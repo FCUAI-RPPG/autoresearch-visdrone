@@ -1,0 +1,26 @@
+[project]
+name = "autoresearch-visdrone"
+version = "0.1.0"
+description = "Autonomous YOLOv12 detection research on VisDrone Task-1"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26.0",
+    "Pillow>=10.0.0",
+    "torch>=2.3.0",
+    "torchvision>=0.18.0",
+    "ultralytics>=8.3.0",
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128" },
+]
+torchvision = [
+    { index = "pytorch-cu128" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
