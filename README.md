@@ -1,5 +1,5 @@
 # autoresearch-visdrone
-
+!!! I am not test before, because this code is not done !!!
 Autonomous fine-tuning research on **VisDrone Task-1 Object Detection** using **YOLOv12**, inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch).
 
 An AI agent is given a pretrained YOLOv12s model and a fine-tuning script. It experiments autonomously — modifying code, training for 5 minutes, checking if results improved, keeping or discarding, and repeating. You wake up to a log of experiments and (hopefully) a better model.
