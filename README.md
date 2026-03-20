@@ -1,5 +1,5 @@
 # autoresearch-visdrone
-!!! I am not test before, because this code is not done !!!
+!!! I haven't tested it yet because the code isn't finished. !!!
 
 Autonomous fine-tuning research on **VisDrone Task-1 Object Detection** using **YOLOv12**, inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch).
 
