@@ -44,7 +44,7 @@ TEST_DIR       = VISDRONE_ROOT / "VisDrone2019-DET-test-dev"
 CHALLENGE_DIR  = VISDRONE_ROOT / "VisDrone2019-DET-testset-challenge"
 
 # ── Pretrained weights ──────────────────────────────────────────────────────
-WEIGHTS        = str(VISDRONE_ROOT / "weights" / "yolov12s.pt")      # downloaded automatically by ultralytics
+WEIGHTS        = "weights/yolov12s.pt"      # downloaded automatically by ultralytics
 
 # ── Freeze: first N layers of model.model are frozen ───────────────────────
 FREEZE_LAYERS  = 10                 # 0 = train everything, 10 = freeze backbone
