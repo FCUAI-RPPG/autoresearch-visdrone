@@ -8,9 +8,6 @@ Strategy:
   3. Fine-tune unfrozen layers + head on VisDrone
   4. Evaluate with prepare.py metrics (val_box_iou, val_cls_acc)
 
-Agent modifies the ① Hyperparameters section only.
-Do NOT modify anything below the ── Model Setup ── comment.
-
 Metrics printed at end (grep-friendly):
     val_box_iou: 0.XXXX
     val_cls_acc: 0.XXXX
@@ -124,13 +121,6 @@ def build_model(weights: str, freeze_layers: int, num_classes: int, device):
     print(f"  Layers frozen   : {freeze_layers} / {len(list(net.model))}")
     print(f"  Frozen params   : {frozen_count / 1e6:.2f}M")
     print(f"  Trainable params: {trainable / 1e6:.2f}M  /  {total / 1e6:.2f}M total")
-    # v8DetectionLoss 需要 model.args 有 .box / .cls / .dfl 屬性
-    from types import SimpleNamespace
-    net.args = SimpleNamespace(
-        box=7.5,
-        cls=0.5,
-        dfl=1.5,
-    )
 
     return net
 
@@ -248,7 +238,22 @@ def main():
     # ── Use ultralytics built-in loss ─────────────────────────────────
     # v8DetectionLoss returns: total_loss, loss_items[box_ciou, cls_bce, dfl]
     from ultralytics.utils.loss import v8DetectionLoss
+    from types import SimpleNamespace
+
+    # Patch model.args so v8DetectionLoss initialises correctly
+    net.args = SimpleNamespace(box=7.5, cls=0.5, dfl=1.5)
+
     criterion = v8DetectionLoss(net)
+
+    # Also patch criterion.hyp directly in case ultralytics stored a dict
+    if isinstance(criterion.hyp, dict):
+        criterion.hyp = SimpleNamespace(**criterion.hyp)
+    if not hasattr(criterion.hyp, "box"):
+        criterion.hyp.box = 7.5
+    if not hasattr(criterion.hyp, "cls"):
+        criterion.hyp.cls = 0.5
+    if not hasattr(criterion.hyp, "dfl"):
+        criterion.hyp.dfl = 1.5
 
     # ── Loss history (one dict per step, saved to CSV at end) ────────
     import csv
