@@ -15,7 +15,10 @@ VisDrone directory structure expected (after manual download from aiskyeye.com):
         VisDrone2019-DET-val/
             images/
             annotations/
-        VisDrone2019-DET-test-dev/   (optional, no annotations)
+        VisDrone2019-DET-test-dev/
+            images/
+            annotations/
+        VisDrone2019-DET-testset-challenge/
             images/
             annotations/
 
@@ -847,15 +850,17 @@ def main():
         help=f"Number of anchor clusters for k-means (default: {DEFAULT_NUM_ANCHORS})"
     )
     parser.add_argument(
-        "--no-anchor-analysis", action="store_true",
-        help="Skip anchor k-means analysis (faster)"
+        "--anchor-analysis", action="store_true",
+        help="Run k-means anchor analysis on train split (optional)"
     )
     args = parser.parse_args()
 
     root = Path(args.root)
     splits = {
-        "train": root / "VisDrone2019-DET-train",
-        "val":   root / "VisDrone2019-DET-val",
+        "train":               root / "VisDrone2019-DET-train",
+        "val":                 root / "VisDrone2019-DET-val",
+        "test-dev":            root / "VisDrone2019-DET-test-dev",
+        "testset-challenge":   root / "VisDrone2019-DET-testset-challenge",
     }
 
     # ---- Step 1: convert annotations ----
@@ -869,7 +874,7 @@ def main():
         convert_split(split_dir, verbose=True)
 
     # ---- Step 2: anchor analysis on train split ----
-    if not args.no_anchor_analysis:
+    if args.anchor_analysis:
         train_dir = splits["train"]
         if train_dir.exists() and (train_dir / "labels").exists():
             print("\n" + "=" * 60)
@@ -930,7 +935,7 @@ def main():
             bar   = "█" * int(ratio * 48)
             print(f"  {cname:<20s}  {cls_count[c]:>7,}  {ratio:>5.1%}  {bar}")
 
-    print("\nSetup complete.  You can now run: python train.py")
+    print("\nSetup complete.  You can now run: python train_simple.py")
 
 
 if __name__ == "__main__":
