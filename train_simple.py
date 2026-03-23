@@ -34,7 +34,7 @@ from prepare import (
 # ① Hyperparameters — agent tweaks these
 # ===========================================================================
 
-VISDRONE_ROOT  = Path(os.environ.get("VISDRONE_ROOT", "/data/visdrone"))
+VISDRONE_ROOT  = Path(os.environ.get("VISDRONE_ROOT", "/content/visdrone"))
 TRAIN_DIR      = VISDRONE_ROOT / "VisDrone2019-DET-train"
 VAL_DIR        = VISDRONE_ROOT / "VisDrone2019-DET-val"
 TEST_DIR       = VISDRONE_ROOT / "VisDrone2019-DET-test-dev"
@@ -50,7 +50,7 @@ FREEZE_LAYERS  = 10                 # 0 = train everything, 10 = freeze backbone
 IMG_SIZE       = 640
 BATCH_SIZE     = 8
 NUM_WORKERS    = 4
-TIME_BUDGET    = 300                # wall-clock training seconds (5 min)
+TIME_BUDGET    = 30                # wall-clock training seconds (5 min)
 
 LR             = 1e-3               # initial lr for unfrozen params (AdamW)
 LR_FROZEN_HEAD = 1e-3               # lr for detection head (always trainable)
@@ -455,6 +455,41 @@ def main():
     print(f"mfu_percent:       {mfu_percent:.2f}")
     print(f"num_steps:         {step}")
     print(f"num_params_M:      {num_params:.1f}")
+
+    # ── Append experiment results to experiments.csv ──────────────────
+    from datetime import datetime
+    exp_csv  = Path("experiments.csv")
+    fieldnames = [
+        "timestamp",
+        "val_box_iou", "val_cls_acc",
+        "test_box_iou", "test_cls_acc",
+        "challenge_test_box_iou", "challenge_test_cls_acc",
+        "training_seconds", "total_seconds",
+        "peak_vram_mb", "mfu_percent",
+        "num_steps", "num_params_M",
+    ]
+    row = {
+        "timestamp":               datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "val_box_iou":             round(metrics["val_box_iou"], 4),
+        "val_cls_acc":             round(metrics["val_cls_acc"], 4),
+        "test_box_iou":            round(test_metrics["val_box_iou"], 4) if test_metrics else "",
+        "test_cls_acc":            round(test_metrics["val_cls_acc"], 4) if test_metrics else "",
+        "challenge_test_box_iou":  round(challenge_metrics["val_box_iou"], 4) if challenge_metrics else "",
+        "challenge_test_cls_acc":  round(challenge_metrics["val_cls_acc"], 4) if challenge_metrics else "",
+        "training_seconds":        round(elapsed_train, 1),
+        "total_seconds":           round(total_seconds, 1),
+        "peak_vram_mb":            peak_vram_mb,
+        "mfu_percent":             round(mfu_percent, 2),
+        "num_steps":               step,
+        "num_params_M":            round(num_params, 1),
+    }
+    write_header = not exp_csv.exists()
+    with open(exp_csv, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+    print(f"\nExperiment result appended → {exp_csv}")
 
 
 if __name__ == "__main__":

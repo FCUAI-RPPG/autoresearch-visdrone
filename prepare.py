@@ -18,7 +18,7 @@ VisDrone directory structure expected (after manual download from aiskyeye.com):
         VisDrone2019-DET-test-dev/
             images/
             annotations/
-        VisDrone2019-DET-testset-challenge/
+        VisDrone2019-DET-test-challenge/
             images/
             annotations/
 
@@ -860,7 +860,7 @@ def main():
         "train":               root / "VisDrone2019-DET-train",
         "val":                 root / "VisDrone2019-DET-val",
         "test-dev":            root / "VisDrone2019-DET-test-dev",
-        "testset-challenge":   root / "VisDrone2019-DET-testset-challenge",
+        "test-challenge":   root / "VisDrone2019-DET-test-challenge",
     }
 
     # ---- Step 1: convert annotations ----
