@@ -46,6 +46,8 @@ from prepare import (
 VISDRONE_ROOT   = Path(os.environ.get("VISDRONE_ROOT", "/data/visdrone"))
 TRAIN_DIR       = VISDRONE_ROOT / "VisDrone2019-DET-train"
 VAL_DIR         = VISDRONE_ROOT / "VisDrone2019-DET-val"
+TEST_DIR        = VISDRONE_ROOT / "VisDrone2019-DET-test-dev"
+CHALLENGE_DIR   = VISDRONE_ROOT / "VisDrone2019-DET-testset-challenge"
 
 IMG_SIZE        = 640           # model input resolution
 BATCH_SIZE      = 8             # images per step
@@ -988,24 +990,42 @@ def main():
         writer.writerows(loss_log)
     print(f"Loss history saved → {loss_csv}  ({len(loss_log)} rows)")
 
-    # ── Evaluation ────────────────────────────────────────────────────────
+    # ── Evaluation helper ────────────────────────────────────────────────
+    def run_eval(loader):
+        preds, gts = [], []
+        with torch.no_grad():
+            for imgs, labels, counts in loader:
+                imgs     = imgs.to(device, non_blocking=True)
+                raw_list = model(imgs)
+                det_list = postprocess(raw_list, IMG_SIZE)
+                for b in range(len(imgs)):
+                    n = counts[b].item()
+                    preds.append(det_list[b].cpu())
+                    gts.append(labels[b, :n].cpu())
+        return evaluate(preds, gts)
+
     model.eval()
-    all_preds: list[torch.Tensor] = []
-    all_gts:   list[torch.Tensor] = []
 
-    with torch.no_grad():
-        for imgs, labels, counts in val_loader:
-            imgs   = imgs.to(device, non_blocking=True)
-            raw_list = model(imgs)
-            det_list = postprocess(raw_list, IMG_SIZE)
+    # Val split
+    metrics = run_eval(val_loader)
 
-            for b in range(len(imgs)):
-                n = counts[b].item()
-                all_preds.append(det_list[b].cpu())
-                # GT format for evaluate(): (G, 5) [cls, cx, cy, bw, bh]
-                all_gts.append(labels[b, :n].cpu())
+    # Test-dev split (if available)
+    test_metrics = None
+    if TEST_DIR.exists() and (TEST_DIR / "labels").exists():
+        test_loader = get_dataloader(
+            TEST_DIR, img_size=IMG_SIZE, batch_size=BATCH_SIZE,
+            num_workers=NUM_WORKERS, augment=False, shuffle=False,
+        )
+        test_metrics = run_eval(test_loader)
 
-    metrics = evaluate(all_preds, all_gts, verbose=True)
+    # Testset-challenge split (if available)
+    challenge_metrics = None
+    if CHALLENGE_DIR.exists() and (CHALLENGE_DIR / "labels").exists():
+        challenge_loader = get_dataloader(
+            CHALLENGE_DIR, img_size=IMG_SIZE, batch_size=BATCH_SIZE,
+            num_workers=NUM_WORKERS, augment=False, shuffle=False,
+        )
+        challenge_metrics = run_eval(challenge_loader)
 
     # Peak VRAM
     peak_vram_mb = 0
@@ -1040,6 +1060,12 @@ def main():
     # ── Results  (grep-friendly format used by autoresearch harness) ──────
     print(f"\nval_box_iou:       {metrics['val_box_iou']:.4f}")
     print(f"val_cls_acc:       {metrics['val_cls_acc']:.4f}")
+    if test_metrics is not None:
+        print(f"test_box_iou:      {test_metrics['val_box_iou']:.4f}")
+        print(f"test_cls_acc:      {test_metrics['val_cls_acc']:.4f}")
+    if challenge_metrics is not None:
+        print(f"challenge_test_box_iou:  {challenge_metrics['val_box_iou']:.4f}")
+        print(f"challenge_test_cls_acc:  {challenge_metrics['val_cls_acc']:.4f}")
     print(f"training_seconds:  {elapsed_train:.1f}")
     print(f"total_seconds:     {total_seconds:.1f}")
     print(f"peak_vram_mb:      {peak_vram_mb}")

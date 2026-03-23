@@ -61,15 +61,21 @@ The first run: Your very first run should always be to establish the baseline, s
 Once the script finishes it prints a summary like this:
 
 ```
-val_box_iou:       0.XXXX
-val_cls_acc:       0.XXXX
-training_seconds:  300.1
-total_seconds:     325.9
-peak_vram_mb:      6142
-mfu_percent:       39.80
-num_steps:         953
-num_params_M:      50.3
+val_box_iou:              0.XXXX
+val_cls_acc:              0.XXXX
+test_box_iou:             0.XXXX
+test_cls_acc:             0.XXXX
+challenge_test_box_iou:   0.XXXX
+challenge_test_cls_acc:   0.XXXX
+training_seconds:         300.1
+total_seconds:            325.9
+peak_vram_mb:             6142
+mfu_percent:              39.80
+num_steps:                953
+num_params_M:             50.3
 ```
+
+Note: `test_box_iou` / `test_cls_acc` are printed only if `VisDrone2019-DET-test-dev/labels/` exists. `challenge_test_box_iou` / `challenge_test_cls_acc` are printed only if `VisDrone2019-DET-testset-challenge/labels/` exists.
 
 Note that the script is configured to always stop after 5 minutes, so depending on the computing platform the numbers might look different. You can extract the key metrics from the log file:
 
