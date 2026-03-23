@@ -356,15 +356,15 @@ def main():
     print(f"\nTraining done: {step} steps, {epoch} epochs, {elapsed_train:.1f}s")
 
     # ── Save loss history → CSV ───────────────────────────────────────
-    loss_csv = Path("loss_history.csv")
-    with open(loss_csv, "w", newline="") as f:
-        writer = csv.DictWriter(
-            f, fieldnames=["step", "epoch", "total", "ciou", "dfl", "bce",
-                           "lr", "elapsed"]
-        )
-        writer.writeheader()
-        writer.writerows(loss_log)
-    print(f"Loss history saved → {loss_csv}  ({len(loss_log)} rows)")
+    # loss_csv = Path("loss_history.csv")
+    # with open(loss_csv, "w", newline="") as f:
+    #     writer = csv.DictWriter(
+    #         f, fieldnames=["step", "epoch", "total", "ciou", "dfl", "bce",
+    #                        "lr", "elapsed"]
+    #     )
+    #     writer.writeheader()
+    #     writer.writerows(loss_log)
+    # print(f"Loss history saved → {loss_csv}  ({len(loss_log)} rows)")
 
     # ── Evaluation helper ────────────────────────────────────────────
     def run_eval(loader):
@@ -493,4 +493,38 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import csv, traceback
+        from datetime import datetime
+        exp_csv = Path("experiments.csv")
+        write_header = not exp_csv.exists()
+        with open(exp_csv, "a", newline="") as f:
+            fieldnames = [
+                "timestamp", "val_box_iou", "val_cls_acc",
+                "test_box_iou", "test_cls_acc",
+                "challenge_test_box_iou", "challenge_test_cls_acc",
+                "training_seconds", "total_seconds",
+                "peak_vram_mb", "mfu_percent",
+                "num_steps", "num_params_M",
+            ]
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
+            writer.writerow({
+                "timestamp":              datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "val_box_iou":            "crash",
+                "val_cls_acc":            "crash",
+                "test_box_iou":           "",
+                "test_cls_acc":           "",
+                "challenge_test_box_iou": "",
+                "challenge_test_cls_acc": "",
+                "training_seconds":       "",
+                "total_seconds":          "",
+                "peak_vram_mb":           "",
+                "mfu_percent":            "",
+                "num_steps":              "",
+                "num_params_M":           str(e)[:50],
+            })
+        raise   # 讓 traceback 繼續顯示
