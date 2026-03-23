@@ -40,6 +40,8 @@ from prepare import (
 VISDRONE_ROOT  = Path(os.environ.get("VISDRONE_ROOT", "/data/visdrone"))
 TRAIN_DIR      = VISDRONE_ROOT / "VisDrone2019-DET-train"
 VAL_DIR        = VISDRONE_ROOT / "VisDrone2019-DET-val"
+TEST_DIR       = VISDRONE_ROOT / "VisDrone2019-DET-test-dev"
+CHALLENGE_DIR  = VISDRONE_ROOT / "VisDrone2019-DET-testset-challenge"
 
 # ── Pretrained weights ──────────────────────────────────────────────────────
 WEIGHTS        = "yolov12s.pt"      # downloaded automatically by ultralytics
@@ -122,6 +124,13 @@ def build_model(weights: str, freeze_layers: int, num_classes: int, device):
     print(f"  Layers frozen   : {freeze_layers} / {len(list(net.model))}")
     print(f"  Frozen params   : {frozen_count / 1e6:.2f}M")
     print(f"  Trainable params: {trainable / 1e6:.2f}M  /  {total / 1e6:.2f}M total")
+    # v8DetectionLoss 需要 model.args 有 .box / .cls / .dfl 屬性
+    from types import SimpleNamespace
+    net.args = SimpleNamespace(
+        box=7.5,
+        cls=0.5,
+        dfl=1.5,
+    )
 
     return net
 
@@ -352,33 +361,48 @@ def main():
         writer.writerows(loss_log)
     print(f"Loss history saved → {loss_csv}  ({len(loss_log)} rows)")
 
-    # ── Evaluation ────────────────────────────────────────────────────
+    # ── Evaluation helper ────────────────────────────────────────────
+    def run_eval(loader):
+        preds, gts = [], []
+        with torch.no_grad():
+            for imgs, labels, counts in loader:
+                imgs = imgs.to(device, non_blocking=True)
+                raw = net(imgs)
+                if isinstance(raw, (list, tuple)):
+                    raw = raw[0]
+                if raw.shape[1] >= 4:
+                    raw = raw.clone()
+                    raw[:, :4] /= IMG_SIZE
+                det_list = postprocess_ultralytics(raw, CONF_THRESHOLD,
+                                                   NMS_IOU_THR, device)
+                for b in range(len(imgs)):
+                    n = counts[b].item()
+                    preds.append(det_list[b].cpu())
+                    gts.append(labels[b, :n].cpu())
+        return evaluate(preds, gts)
+
     net.eval()
-    all_preds, all_gts = [], []
 
-    with torch.no_grad():
-        for imgs, labels, counts in val_loader:
-            imgs = imgs.to(device, non_blocking=True)
+    # Val split
+    metrics = run_eval(val_loader)
 
-            # eval mode: ultralytics returns decoded (B, 4+NC, A)
-            raw = net(imgs)
-            # raw may be a tuple in some versions; unwrap
-            if isinstance(raw, (list, tuple)):
-                raw = raw[0]
-            # Normalise boxes to [0,1] if they are in pixel space
-            if raw.shape[1] >= 4:
-                raw = raw.clone()
-                raw[:, :4] /= IMG_SIZE
+    # Test-dev split (if available)
+    test_metrics = None
+    if TEST_DIR.exists() and (TEST_DIR / "labels").exists():
+        test_loader = get_dataloader(
+            TEST_DIR, img_size=IMG_SIZE, batch_size=BATCH_SIZE,
+            num_workers=NUM_WORKERS, augment=False, shuffle=False,
+        )
+        test_metrics = run_eval(test_loader)
 
-            det_list = postprocess_ultralytics(raw, CONF_THRESHOLD,
-                                               NMS_IOU_THR, device)
-
-            for b in range(len(imgs)):
-                n = counts[b].item()
-                all_preds.append(det_list[b].cpu())
-                all_gts.append(labels[b, :n].cpu())
-
-    metrics = evaluate(all_preds, all_gts, verbose=True)
+    # Testset-challenge split (if available)
+    challenge_metrics = None
+    if CHALLENGE_DIR.exists() and (CHALLENGE_DIR / "labels").exists():
+        challenge_loader = get_dataloader(
+            CHALLENGE_DIR, img_size=IMG_SIZE, batch_size=BATCH_SIZE,
+            num_workers=NUM_WORKERS, augment=False, shuffle=False,
+        )
+        challenge_metrics = run_eval(challenge_loader)
 
     peak_vram_mb = 0
     if device.type == "cuda":
@@ -414,6 +438,12 @@ def main():
     # ── Results  (grep-friendly, used by autoresearch harness) ────────
     print(f"\nval_box_iou:       {metrics['val_box_iou']:.4f}")
     print(f"val_cls_acc:       {metrics['val_cls_acc']:.4f}")
+    if test_metrics is not None:
+        print(f"test_box_iou:      {test_metrics['val_box_iou']:.4f}")
+        print(f"test_cls_acc:      {test_metrics['val_cls_acc']:.4f}")
+    if challenge_metrics is not None:
+        print(f"challenge_test_box_iou:  {challenge_metrics['val_box_iou']:.4f}")
+        print(f"challenge_test_cls_acc:  {challenge_metrics['val_cls_acc']:.4f}")
     print(f"training_seconds:  {elapsed_train:.1f}")
     print(f"total_seconds:     {total_seconds:.1f}")
     print(f"peak_vram_mb:      {peak_vram_mb}")
