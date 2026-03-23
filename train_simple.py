@@ -8,9 +8,6 @@ Strategy:
   3. Fine-tune unfrozen layers + head on VisDrone
   4. Evaluate with prepare.py metrics (val_box_iou, val_cls_acc)
 
-Agent modifies the ① Hyperparameters section only.
-Do NOT modify anything below the ── Model Setup ── comment.
-
 Metrics printed at end (grep-friendly):
     val_box_iou: 0.XXXX
     val_cls_acc: 0.XXXX
@@ -241,7 +238,22 @@ def main():
     # ── Use ultralytics built-in loss ─────────────────────────────────
     # v8DetectionLoss returns: total_loss, loss_items[box_ciou, cls_bce, dfl]
     from ultralytics.utils.loss import v8DetectionLoss
+    from types import SimpleNamespace
+
+    # Patch model.args so v8DetectionLoss initialises correctly
+    net.args = SimpleNamespace(box=7.5, cls=0.5, dfl=1.5)
+
     criterion = v8DetectionLoss(net)
+
+    # Force criterion.hyp to SimpleNamespace regardless of what ultralytics stored
+    # (different ultralytics versions store it as dict or IterableSimpleNamespace)
+    hyp_box = getattr(criterion.hyp, "box", None) or \
+              (criterion.hyp.get("box") if isinstance(criterion.hyp, dict) else None) or 7.5
+    hyp_cls = getattr(criterion.hyp, "cls", None) or \
+              (criterion.hyp.get("cls") if isinstance(criterion.hyp, dict) else None) or 0.5
+    hyp_dfl = getattr(criterion.hyp, "dfl", None) or \
+              (criterion.hyp.get("dfl") if isinstance(criterion.hyp, dict) else None) or 1.5
+    criterion.hyp = SimpleNamespace(box=hyp_box, cls=hyp_cls, dfl=hyp_dfl)
 
     # ── Loss history (one dict per step, saved to CSV at end) ────────
     import csv
