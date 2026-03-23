@@ -1,9 +1,8 @@
 # autoresearch-visdrone
-!!! I haven't tested it yet because the code isn't finished. !!!
 
-Autonomous fine-tuning research on **VisDrone Task-1 Object Detection** using **YOLOv12**, inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch).
+Autonomous fine-tuning research on **VisDrone Task-1 Object Detection in Images** using **YOLOv12**, inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch).
 
-An AI agent is given a pretrained YOLOv12s model and a fine-tuning script. It experiments autonomously — modifying code, training for 5 minutes, checking if results improved, keeping or discarding, and repeating. You wake up to a log of experiments and (hopefully) a better model.
+The idea: give an AI agent a pretrained YOLOv12s model and a fine-tuning script, let it experiment autonomously overnight. It modifies the code, trains for 5 minutes, checks if the result improved, keeps or discards, and repeats. You wake up in the morning to a log of experiments and (hopefully) a better model.
 
 ---
 
@@ -33,8 +32,8 @@ Every experiment runs for a fixed **5-minute wall-clock budget**. The agent edit
 
 | Metric | Description | Direction |
 |---|---|---|
-| `val_box_iou` | Mean best-GT IoU of all predictions | higher is better |
-| `val_cls_acc` | Classification accuracy of matched pred–GT pairs | higher is better |
+| `val_box_iou` | Mean best-GT IoU of all predictions | ↑ higher is better |
+| `val_cls_acc` | Classification accuracy of matched pred–GT pairs | ↑ higher is better |
 
 ---
 
@@ -60,6 +59,44 @@ Download from [aiskyeye.com](http://aiskyeye.com) (registration required). Expec
 
 **10 object categories:** pedestrian, people, bicycle, car, van, truck, tricycle, awning-tricycle, bus, motor.
 
+### Google Colab — recommended dataset layout
+
+Place the dataset and pretrained weights inside the cloned repo folder:
+
+```
+autoresearch-visdrone/
+    weights/
+        yolov12s.pt
+    VisDrone2019-DET-train/
+        images/
+        annotations/
+    VisDrone2019-DET-val/
+        images/
+        annotations/
+    VisDrone2019-DET-test-dev/
+        images/
+        annotations/
+    VisDrone2019-DET-testset-challenge/
+        images/
+        annotations/
+```
+
+Download and place the weights before running:
+
+```python
+import os
+os.makedirs("weights", exist_ok=True)
+!wget -q https://github.com/sunsmarterjie/yolov12/releases/download/v1.0/yolov12s.pt \
+      -O weights/yolov12s.pt
+```
+
+Run directly — `VISDRONE_ROOT` defaults to the folder containing `train_simple.py`:
+
+```python
+%cd /content/autoresearch-visdrone
+!python train_simple.py
+```
+
 ---
 
 ## Quick start
@@ -70,12 +107,11 @@ Download from [aiskyeye.com](http://aiskyeye.com) (registration required). Expec
 # 1. Install uv (if not already installed)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 2. Clone and install dependencies
-git clone https://github.com/FCUAI-RPPG/autoresearch-visdrone.git
-cd autoresearch-visdrone
+# 2. Install dependencies
 uv sync
 
-# 3. Prepare dataset — one-time, converts VisDrone annotations to YOLO format
+# 3. Prepare dataset — one-time, converts VisDrone annotations → YOLO format
+#    and runs anchor k-means analysis
 VISDRONE_ROOT=/path/to/visdrone uv run prepare.py --root /path/to/visdrone
 
 # 4. Run a single training experiment (~5 min)
@@ -102,7 +138,7 @@ The agent reads `program.md`, creates a branch, establishes a baseline, and loop
 
 One-time data preparation and runtime utilities:
 
-- Converts VisDrone `.txt` annotations to YOLO-format label files (`labels/*.txt`)
+- Converts VisDrone `.txt` annotations → YOLO-format label files (`labels/*.txt`)
 - K-means anchor analysis on GT boxes (IoU-distance metric, YOLOv5-style)
 - `VisDroneDetDataset` and `get_dataloader()` for training
 - `evaluate()` returning `val_box_iou` and `val_cls_acc`
@@ -185,8 +221,6 @@ Results are logged in `results.tsv` (tab-separated, untracked by git):
 commit	val_box_iou	val_cls_acc	memory_gb	status	description
 a1b2c3d	0.4210	0.7830	6.0	keep	baseline FREEZE_LAYERS=10 LR=1e-3
 b2c3d4e	0.4380	0.7910	6.1	keep	LR=5e-4 WARMUP_STEPS=500
-c3d4e5f	0.4190	0.7750	6.0	discard	LR=2e-3 unstable loss
-d4e5f6g	0.0000	0.0000	0.0	crash	BATCH_SIZE=32 OOM
 ```
 
 ---

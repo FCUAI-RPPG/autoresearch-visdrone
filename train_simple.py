@@ -34,7 +34,7 @@ from prepare import (
 # ① Hyperparameters — agent tweaks these
 # ===========================================================================
 
-VISDRONE_ROOT  = Path(os.environ.get("VISDRONE_ROOT", "/content/visdrone"))
+VISDRONE_ROOT  = Path(os.environ.get("VISDRONE_ROOT", Path(__file__).parent))
 TRAIN_DIR      = VISDRONE_ROOT / "VisDrone2019-DET-train"
 VAL_DIR        = VISDRONE_ROOT / "VisDrone2019-DET-val"
 TEST_DIR       = VISDRONE_ROOT / "VisDrone2019-DET-test-dev"
