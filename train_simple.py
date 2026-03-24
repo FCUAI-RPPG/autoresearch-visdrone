@@ -11,6 +11,8 @@ Strategy:
 Metrics printed at end (grep-friendly):
     val_box_iou: 0.XXXX
     val_cls_acc: 0.XXXX
+    val_mAP50: 0.XXXX
+    val_mAP50_95: 0.XXXX
     peak_vram_mb: XXXX
 """
 
@@ -50,7 +52,7 @@ FREEZE_LAYERS  = 10                 # 0 = train everything, 10 = freeze backbone
 IMG_SIZE       = 640
 BATCH_SIZE     = 8
 NUM_WORKERS    = 4
-TIME_BUDGET    = 30                # wall-clock training seconds (5 min)
+TIME_BUDGET    = 300                # wall-clock training seconds (5 min)
 
 LR             = 1e-3               # initial lr for unfrozen params (AdamW)
 LR_FROZEN_HEAD = 1e-3               # lr for detection head (always trainable)
@@ -443,12 +445,18 @@ def main():
     # ── Results  (grep-friendly, used by autoresearch harness) ────────
     print(f"\nval_box_iou:       {metrics['val_box_iou']:.4f}")
     print(f"val_cls_acc:       {metrics['val_cls_acc']:.4f}")
+    print(f"val_mAP50:         {metrics['val_mAP50']:.4f}")
+    print(f"val_mAP50_95:      {metrics['val_mAP50_95']:.4f}")
     if test_metrics is not None:
         print(f"test_box_iou:      {test_metrics['val_box_iou']:.4f}")
         print(f"test_cls_acc:      {test_metrics['val_cls_acc']:.4f}")
+        print(f"test_mAP50:        {test_metrics['val_mAP50']:.4f}")
+        print(f"test_mAP50_95:     {test_metrics['val_mAP50_95']:.4f}")
     if challenge_metrics is not None:
         print(f"challenge_test_box_iou:  {challenge_metrics['val_box_iou']:.4f}")
         print(f"challenge_test_cls_acc:  {challenge_metrics['val_cls_acc']:.4f}")
+        print(f"challenge_test_mAP50:    {challenge_metrics['val_mAP50']:.4f}")
+        print(f"challenge_test_mAP50_95: {challenge_metrics['val_mAP50_95']:.4f}")
     print(f"training_seconds:  {elapsed_train:.1f}")
     print(f"total_seconds:     {total_seconds:.1f}")
     print(f"peak_vram_mb:      {peak_vram_mb}")
@@ -461,9 +469,10 @@ def main():
     exp_csv  = Path("experiments.csv")
     fieldnames = [
         "timestamp",
-        "val_box_iou", "val_cls_acc",
-        "test_box_iou", "test_cls_acc",
+        "val_box_iou", "val_cls_acc", "val_mAP50", "val_mAP50_95",
+        "test_box_iou", "test_cls_acc", "test_mAP50", "test_mAP50_95",
         "challenge_test_box_iou", "challenge_test_cls_acc",
+        "challenge_test_mAP50", "challenge_test_mAP50_95",
         "training_seconds", "total_seconds",
         "peak_vram_mb", "mfu_percent",
         "num_steps", "num_params_M",
@@ -472,10 +481,16 @@ def main():
         "timestamp":               datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "val_box_iou":             round(metrics["val_box_iou"], 4),
         "val_cls_acc":             round(metrics["val_cls_acc"], 4),
+        "val_mAP50":               round(metrics["val_mAP50"], 4),
+        "val_mAP50_95":            round(metrics["val_mAP50_95"], 4),
         "test_box_iou":            round(test_metrics["val_box_iou"], 4) if test_metrics else "",
         "test_cls_acc":            round(test_metrics["val_cls_acc"], 4) if test_metrics else "",
+        "test_mAP50":              round(test_metrics["val_mAP50"], 4) if test_metrics else "",
+        "test_mAP50_95":           round(test_metrics["val_mAP50_95"], 4) if test_metrics else "",
         "challenge_test_box_iou":  round(challenge_metrics["val_box_iou"], 4) if challenge_metrics else "",
         "challenge_test_cls_acc":  round(challenge_metrics["val_cls_acc"], 4) if challenge_metrics else "",
+        "challenge_test_mAP50":    round(challenge_metrics["val_mAP50"], 4) if challenge_metrics else "",
+        "challenge_test_mAP50_95": round(challenge_metrics["val_mAP50_95"], 4) if challenge_metrics else "",
         "training_seconds":        round(elapsed_train, 1),
         "total_seconds":           round(total_seconds, 1),
         "peak_vram_mb":            peak_vram_mb,
@@ -503,8 +518,11 @@ if __name__ == "__main__":
         with open(exp_csv, "a", newline="") as f:
             fieldnames = [
                 "timestamp", "val_box_iou", "val_cls_acc",
+                "val_mAP50", "val_mAP50_95",
                 "test_box_iou", "test_cls_acc",
+                "test_mAP50", "test_mAP50_95",
                 "challenge_test_box_iou", "challenge_test_cls_acc",
+                "challenge_test_mAP50", "challenge_test_mAP50_95",
                 "training_seconds", "total_seconds",
                 "peak_vram_mb", "mfu_percent",
                 "num_steps", "num_params_M",
@@ -516,10 +534,16 @@ if __name__ == "__main__":
                 "timestamp":              datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "val_box_iou":            "crash",
                 "val_cls_acc":            "crash",
+                "val_mAP50":              "crash",
+                "val_mAP50_95":           "crash",
                 "test_box_iou":           "",
                 "test_cls_acc":           "",
+                "test_mAP50":             "",
+                "test_mAP50_95":          "",
                 "challenge_test_box_iou": "",
                 "challenge_test_cls_acc": "",
+                "challenge_test_mAP50":   "",
+                "challenge_test_mAP50_95":"",
                 "training_seconds":       "",
                 "total_seconds":          "",
                 "peak_vram_mb":           "",

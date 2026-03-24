@@ -761,6 +761,185 @@ def compute_cls_accuracy(
 
 
 # ---------------------------------------------------------------------------
+# Metric 3 — mAP (mean Average Precision)
+# ---------------------------------------------------------------------------
+
+def compute_map(
+    pred_boxes_list: list[torch.Tensor],
+    gt_boxes_list:   list[torch.Tensor],
+    iou_thresholds:  list[float] | None = None,
+) -> dict:
+    """
+    Compute mAP@50 and mAP@50:95 (COCO-style) across all images.
+
+    For each class:
+      1. Collect all predictions (with confidence) and GT boxes across images.
+      2. Sort predictions by confidence descending.
+      3. Greedily match each prediction to the best unmatched GT (IoU ≥ thr).
+      4. Compute precision-recall curve → AP via all-point interpolation.
+
+    Parameters
+    ----------
+    pred_boxes_list : list[Tensor (P, 6)]  — cx cy w h conf cls
+    gt_boxes_list   : list[Tensor (G, 5)]  — cls cx cy w h
+    iou_thresholds  : list of IoU thresholds (default: [0.50, 0.55, ..., 0.95])
+
+    Returns
+    -------
+    dict with keys:
+        val_mAP50      : float — mAP at IoU=0.50
+        val_mAP50_95   : float — mAP averaged over IoU 0.50:0.05:0.95
+        per_class_ap50 : dict[class_name → float]
+    """
+    if iou_thresholds is None:
+        iou_thresholds = [0.5 + 0.05 * i for i in range(10)]  # 0.50 .. 0.95
+
+    # ── Gather all predictions and GTs per class across all images ────
+    # pred_by_class[c] = list of (confidence, image_idx, pred_box_idx)
+    # gt_by_class[c]   = list of (image_idx, gt_box_idx)
+    pred_per_class: dict[int, list] = {c: [] for c in range(NUM_CLASSES)}
+    gt_per_class:   dict[int, list] = {c: [] for c in range(NUM_CLASSES)}
+
+    # Store boxes per image for IoU computation later
+    all_pred_boxes = []   # list of Tensor (P, 4) per image
+    all_gt_boxes   = []   # list of Tensor (G, 4) per image
+
+    for img_idx, (preds, gts) in enumerate(zip(pred_boxes_list, gt_boxes_list)):
+        # Predictions
+        if preds is not None and len(preds) > 0:
+            all_pred_boxes.append(preds[:, :4])  # cx cy w h
+            for pi in range(len(preds)):
+                cls_id = int(preds[pi, 5].item())
+                conf   = float(preds[pi, 4].item())
+                if 0 <= cls_id < NUM_CLASSES:
+                    pred_per_class[cls_id].append((conf, img_idx, pi))
+        else:
+            all_pred_boxes.append(torch.zeros((0, 4)))
+
+        # Ground truths
+        if gts is not None and len(gts) > 0:
+            all_gt_boxes.append(gts[:, 1:5])  # cx cy w h
+            for gi in range(len(gts)):
+                cls_id = int(gts[gi, 0].item())
+                if 0 <= cls_id < NUM_CLASSES:
+                    gt_per_class[cls_id].append((img_idx, gi))
+        else:
+            all_gt_boxes.append(torch.zeros((0, 4)))
+
+    # ── Compute AP per class per IoU threshold ────────────────────────
+    def _compute_ap_single(cls_id: int, iou_thr: float) -> float:
+        """AP for one class at one IoU threshold."""
+        preds_c = pred_per_class[cls_id]
+        gts_c   = gt_per_class[cls_id]
+        n_gt    = len(gts_c)
+
+        if n_gt == 0:
+            return float('nan')  # no GT for this class
+        if len(preds_c) == 0:
+            return 0.0
+
+        # Sort predictions by confidence descending
+        preds_c_sorted = sorted(preds_c, key=lambda x: -x[0])
+
+        # Build a set of GT indices per image for this class
+        gt_by_img: dict[int, list[int]] = {}
+        for img_idx, gi in gts_c:
+            gt_by_img.setdefault(img_idx, []).append(gi)
+
+        # Track which GTs have been matched (per image)
+        matched: dict[int, set] = {img_idx: set() for img_idx in gt_by_img}
+
+        tp = np.zeros(len(preds_c_sorted), dtype=np.float64)
+        fp = np.zeros(len(preds_c_sorted), dtype=np.float64)
+
+        for det_idx, (conf, img_idx, pi) in enumerate(preds_c_sorted):
+            if img_idx not in gt_by_img:
+                fp[det_idx] = 1.0
+                continue
+
+            # Compute IoU between this pred and all GTs of this class in this image
+            pred_box = all_pred_boxes[img_idx][pi:pi+1]  # (1, 4)
+            gt_indices = gt_by_img[img_idx]
+            gt_boxes_img = all_gt_boxes[img_idx]
+
+            # Get GT boxes for this class in this image
+            gt_cls_boxes = gt_boxes_img[gt_indices]  # (K, 4)
+
+            p_xyxy = cxcywh_to_xyxy(pred_box)        # (1, 4)
+            g_xyxy = cxcywh_to_xyxy(gt_cls_boxes)    # (K, 4)
+            ious   = box_iou_batch(p_xyxy, g_xyxy)    # (1, K)
+
+            if ious.numel() == 0:
+                fp[det_idx] = 1.0
+                continue
+
+            best_iou, best_k = ious[0].max(0)
+            best_gi = gt_indices[best_k.item()]
+
+            if best_iou.item() >= iou_thr and best_gi not in matched[img_idx]:
+                tp[det_idx] = 1.0
+                matched[img_idx].add(best_gi)
+            else:
+                fp[det_idx] = 1.0
+
+        # Cumulative sums
+        tp_cumsum = np.cumsum(tp)
+        fp_cumsum = np.cumsum(fp)
+
+        recall    = tp_cumsum / n_gt
+        precision = tp_cumsum / (tp_cumsum + fp_cumsum + 1e-9)
+
+        # All-point interpolation (COCO style)
+        # Prepend (recall=0, precision=1) and append (recall=1, precision=0)
+        recall    = np.concatenate(([0.0], recall, [1.0]))
+        precision = np.concatenate(([1.0], precision, [0.0]))
+
+        # Make precision monotonically decreasing (right to left)
+        for i in range(len(precision) - 2, -1, -1):
+            precision[i] = max(precision[i], precision[i + 1])
+
+        # Find points where recall changes
+        idx = np.where(recall[1:] != recall[:-1])[0]
+        ap  = np.sum((recall[idx + 1] - recall[idx]) * precision[idx + 1])
+
+        return float(ap)
+
+    # ── Aggregate across classes and thresholds ───────────────────────
+    ap_per_class_per_thr = {}  # (cls, thr) → ap
+    for c in range(NUM_CLASSES):
+        for thr in iou_thresholds:
+            ap_per_class_per_thr[(c, thr)] = _compute_ap_single(c, thr)
+
+    # mAP@50
+    ap50_values = [ap_per_class_per_thr[(c, 0.5)]
+                   for c in range(NUM_CLASSES)
+                   if not np.isnan(ap_per_class_per_thr[(c, 0.5)])]
+    mAP50 = float(np.mean(ap50_values)) if ap50_values else 0.0
+
+    # mAP@50:95
+    ap_all = []
+    for c in range(NUM_CLASSES):
+        class_aps = [ap_per_class_per_thr[(c, thr)]
+                     for thr in iou_thresholds
+                     if not np.isnan(ap_per_class_per_thr[(c, thr)])]
+        if class_aps:
+            ap_all.append(float(np.mean(class_aps)))
+    mAP50_95 = float(np.mean(ap_all)) if ap_all else 0.0
+
+    # Per-class AP@50
+    per_class_ap50 = {}
+    for c in range(NUM_CLASSES):
+        name = CLASS_NAMES[c]
+        per_class_ap50[name] = ap_per_class_per_thr[(c, 0.5)]
+
+    return dict(
+        val_mAP50      = mAP50,
+        val_mAP50_95   = mAP50_95,
+        per_class_ap50 = per_class_ap50,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Combined evaluation entry-point  (call this from train.py)
 # ---------------------------------------------------------------------------
 
@@ -811,8 +990,9 @@ def evaluate(
     box_iou  = compute_box_iou(pred_boxes_list, gt_boxes_list)
     cls_info = compute_cls_accuracy(pred_boxes_list, gt_boxes_list,
                                     match_iou_thr=match_iou_thr)
+    map_info = compute_map(pred_boxes_list, gt_boxes_list)
 
-    result = dict(val_box_iou=box_iou, **cls_info)
+    result = dict(val_box_iou=box_iou, **cls_info, **map_info)
 
     if verbose:
         print(f"\n[Evaluation]  IoU threshold for matching = {match_iou_thr}")
@@ -820,6 +1000,13 @@ def evaluate(
               f"(mean best-GT IoU over {cls_info['n_pred']} predictions)")
         print(f"  Metric 2 — val_cls_acc : {cls_info['val_cls_acc']:.4f}  "
               f"({cls_info['n_matched']} matched / {cls_info['n_gt']} GT boxes)")
+        print(f"  Metric 3 — val_mAP50   : {map_info['val_mAP50']:.4f}")
+        print(f"  Metric 4 — val_mAP50_95: {map_info['val_mAP50_95']:.4f}")
+        print(f"\n  Per-class AP@50:")
+        for name, ap in map_info["per_class_ap50"].items():
+            bar = ("█" * int(ap * 20)).ljust(20) if not np.isnan(ap) else " " * 20
+            ap_str = f"{ap:.3f}" if not np.isnan(ap) else "  N/A "
+            print(f"    {name:>18s}  {ap_str}  |{bar}|")
         print(f"\n  Per-class classification accuracy:")
         for name, acc in cls_info["per_class_acc"].items():
             bar = ("█" * int(acc * 20)).ljust(20) if not np.isnan(acc) else " " * 20
