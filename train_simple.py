@@ -1,9 +1,9 @@
 """
-train_simple.py — Fine-tune YOLOv12s on VisDrone Task-1
+train_simple.py — Fine-tune YOLOv12x on VisDrone Task-1
                   using Ultralytics as the backbone.
 
 Strategy:
-  1. Load official yolov12s.pt pretrained weights
+  1. Load official yolov12x.pt pretrained weights
   2. Freeze the first FREEZE_LAYERS layers (default: 10)
   3. Fine-tune unfrozen layers + head on VisDrone
   4. Evaluate with prepare.py metrics (val_box_iou, val_cls_acc)
@@ -17,7 +17,7 @@ Metrics printed at end (grep-friendly):
 """
 
 from __future__ import annotations
-
+from dotenv import load_dotenv
 import os
 import time
 from pathlib import Path
@@ -35,24 +35,24 @@ from prepare import (
 # ===========================================================================
 # ① Hyperparameters — agent tweaks these
 # ===========================================================================
-
-VISDRONE_ROOT  = Path(os.environ.get("VISDRONE_ROOT", Path(__file__).parent))
+load_dotenv()
+VISDRONE_ROOT = Path(os.getenv("VISDRONE_ROOT", Path(__file__).resolve().parent))
 TRAIN_DIR      = VISDRONE_ROOT / "VisDrone2019-DET-train"
 VAL_DIR        = VISDRONE_ROOT / "VisDrone2019-DET-val"
 TEST_DIR       = VISDRONE_ROOT / "VisDrone2019-DET-test-dev"
 CHALLENGE_DIR  = VISDRONE_ROOT / "VisDrone2019-DET-testset-challenge"
 
 # ── Pretrained weights ──────────────────────────────────────────────────────
-WEIGHTS        = "weights/yolo12s.pt"       # downloaded automatically by ultralytics
+WEIGHTS        = "weights/yolo12x.pt"       # downloaded automatically by ultralytics
 
 # ── Freeze: first N layers of model.model are frozen ───────────────────────
-FREEZE_LAYERS  = 10                 # 0 = train everything, 10 = freeze backbone
+FREEZE_LAYERS  = 11                 # 0 = train everything, 11 = freeze backbone
 
 # ── Training ────────────────────────────────────────────────────────────────
-IMG_SIZE       = 640
-BATCH_SIZE     = 8
-NUM_WORKERS    = 4
-TIME_BUDGET    = 300                # wall-clock training seconds (5 min)
+IMG_SIZE       = 1280
+BATCH_SIZE     = 32
+NUM_WORKERS    = 8
+TIME_BUDGET    = 300                # wall-clock training seconds (10 min)
 
 LR             = 3e-4               # initial lr for unfrozen params (AdamW)
 LR_FROZEN_HEAD = 1e-3               # lr for detection head (always trainable)
@@ -71,7 +71,7 @@ NMS_IOU_THR    = 0.45
 
 def build_model(weights: str, freeze_layers: int, num_classes: int, device):
     """
-    Load YOLOv12s pretrained weights via ultralytics,
+    Load YOLOv12x pretrained weights via ultralytics,
     replace the detection head for num_classes,
     and freeze the first freeze_layers layers.
 
