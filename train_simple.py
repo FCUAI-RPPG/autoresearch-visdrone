@@ -56,7 +56,7 @@ TIME_BUDGET    = 300                # wall-clock training seconds (10 min)
 
 LR             = 3e-4               # initial lr for unfrozen params (AdamW)
 LR_FROZEN_HEAD = 1e-3               # lr for detection head (always trainable)
-WEIGHT_DECAY   = 1e-4
+WEIGHT_DECAY   = 1e-3
 WARMUP_STEPS   = 100
 MAX_GRAD_NORM  = 10.0
 
