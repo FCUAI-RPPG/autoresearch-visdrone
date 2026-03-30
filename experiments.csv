@@ -1,0 +1,5 @@
+timestamp,val_box_iou,val_cls_acc,val_mAP50,val_mAP50_95,test_box_iou,test_cls_acc,test_mAP50,test_mAP50_95,challenge_test_box_iou,challenge_test_cls_acc,challenge_test_mAP50,challenge_test_mAP50_95,training_seconds,total_seconds,peak_vram_mb,mfu_percent,num_steps,num_params_M
+2026-03-30 09:07:11,crash,crash,crash,crash,,,,,,,,,,,,,,No images found in /home/dgx/Jimmy/autoresearch-vi
+2026-03-30 09:09:09,crash,crash,crash,crash,,,,,,,,,,,,,,'AAttn' object has no attribute 'qkv'
+2026-03-30 09:16:49,crash,crash,crash,crash,,,,,,,,,,,,,,grad can be implicitly created only for scalar out
+2026-03-30 09:25:19,0.7051,0.8435,0.192,0.1154,0.6886,0.8298,0.1539,0.0919,,,,,300.3,386.7,1875,0.0,6038,9.3
