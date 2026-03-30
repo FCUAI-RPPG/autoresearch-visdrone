@@ -182,7 +182,8 @@ def postprocess_ultralytics(raw, conf_thr: float, nms_thr: float, device):
                 from torchvision.ops import nms as tv_nms
                 from prepare import cxcywh_to_xyxy
                 keep = tv_nms(cxcywh_to_xyxy(cb), cs, nms_thr)
-            except Exception:
+            except Exception as e:
+                print(f"[WARN] NMS failed for class {c}: {e}, skipping NMS")
                 keep = torch.arange(len(cb), device=device)
             kept.append(torch.cat([
                 cb[keep],
@@ -375,11 +376,32 @@ def main():
             for imgs, labels, counts in loader:
                 imgs = imgs.to(device, non_blocking=True)
                 raw = net(imgs)
+
+                # Robustly extract decoded pred tensor from various ultralytics
+                # output formats:
+                #   eval mode (new):  Tensor(B, 4+NC, A)
+                #   eval mode (old):  tuple(Tensor(B, 4+NC, A), [train_outs...])
+                # Search for the tensor whose channel dim == 4 + NUM_CLASSES.
                 if isinstance(raw, (list, tuple)):
-                    raw = raw[0]
+                    decoded = None
+                    for item in raw:
+                        if (isinstance(item, torch.Tensor)
+                                and item.ndim == 3
+                                and item.shape[1] == 4 + NUM_CLASSES):
+                            decoded = item
+                            break
+                    raw = decoded if decoded is not None else raw[0]
+
+                # Normalise box coords using actual spatial dims (handles
+                # non-square / letterboxed images correctly).
                 if raw.shape[1] >= 4:
+                    _, _, h, w = imgs.shape
                     raw = raw.clone()
-                    raw[:, :4] /= IMG_SIZE
+                    raw[:, 0] /= w   # cx
+                    raw[:, 1] /= h   # cy
+                    raw[:, 2] /= w   # bw
+                    raw[:, 3] /= h   # bh
+
                 det_list = postprocess_ultralytics(raw, CONF_THRESHOLD,
                                                    NMS_IOU_THR, device)
                 for b in range(len(imgs)):
@@ -436,7 +458,7 @@ def main():
                 (v for k, v in gpu_flops_per_sec.items() if k in gpu_name), None
             )
             if peak_flops:
-                flops_per_step = 6 * (num_params * 1e6) * BATCH_SIZE
+                flops_per_step = 6 * (num_params * 1e6) * BATCH_SIZE * IMG_SIZE ** 2
                 total_flops    = flops_per_step * step
                 mfu_percent    = 100.0 * total_flops / (peak_flops * elapsed_train)
         except Exception:

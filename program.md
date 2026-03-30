@@ -73,10 +73,6 @@ test_box_iou:             0.XXXX
 test_cls_acc:             0.XXXX
 test_mAP50:               0.XXXX
 test_mAP50_95:            0.XXXX
-challenge_test_box_iou:   0.XXXX
-challenge_test_cls_acc:   0.XXXX
-challenge_test_mAP50:     0.XXXX
-challenge_test_mAP50_95:  0.XXXX
 training_seconds:         300.1
 total_seconds:            325.9
 peak_vram_mb:             6142
