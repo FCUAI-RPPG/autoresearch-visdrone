@@ -61,7 +61,7 @@ WARMUP_STEPS   = 200
 MAX_GRAD_NORM  = 10.0
 
 # ── Inference ───────────────────────────────────────────────────────────────
-CONF_THRESHOLD = 0.25
+CONF_THRESHOLD = 0.01
 NMS_IOU_THR    = 0.45
 
 
