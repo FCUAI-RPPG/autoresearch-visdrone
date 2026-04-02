@@ -246,7 +246,7 @@ def main():
 
     # ── Optimiser & scheduler ──────────────────────────────────────────
     optimizer = build_optimizer(net, LR, WEIGHT_DECAY)
-    total_steps = 10_000   # upper bound for cosine schedule
+    total_steps = 800      # match actual training steps for proper cosine decay
 
     def lr_lambda(step: int) -> float:
         if step < WARMUP_STEPS:
