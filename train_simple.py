@@ -56,7 +56,7 @@ TIME_BUDGET    = 1200                # wall-clock training seconds (20 min)
 
 LR             = 5e-5               # initial lr for unfrozen params (AdamW)
 WEIGHT_DECAY   = 5e-4
-WARMUP_STEPS   = 150
+WARMUP_STEPS   = 50
 MAX_GRAD_NORM  = 10.0
 
 # ── Inference ───────────────────────────────────────────────────────────────
