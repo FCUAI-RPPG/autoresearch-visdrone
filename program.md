@@ -33,7 +33,7 @@ Work with the user to complete the following before the experiment loop begins.
 
 ## Experimentation
 
-Each experiment runs on a single GPU. The training script runs for a fixed time budget of 5 minutes (wall clock training time, excluding startup/compilation). You launch it simply as: `uv run train_simple.py`.
+Each experiment runs on a single GPU. The training script runs for a fixed time budget of 20 minutes (wall clock training time, excluding startup/compilation). You launch it simply as: `uv run train_simple.py`.
 
 ### What you CAN do:
 
@@ -44,7 +44,7 @@ Each experiment runs on a single GPU. The training script runs for a fixed time 
 - Modify `prepare.py` in any way.
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
 - Modify the evaluation harness.
-- Change `TIME_BUDGET` — every run must train for exactly 5 minutes.
+- Change `TIME_BUDGET` — every run must train for exactly 20 minutes.
 
 ### Primary goal
 
@@ -73,7 +73,7 @@ test_box_iou:             0.XXXX
 test_cls_acc:             0.XXXX
 test_mAP50:               0.XXXX
 test_mAP50_95:            0.XXXX
-training_seconds:         300.1
+training_seconds:         1200.1
 total_seconds:            325.9
 peak_vram_mb:             6142
 mfu_percent:              39.80
@@ -146,10 +146,10 @@ LOOP FOREVER:
 
 The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck in some way, you can rewind but you should probably do this very very sparingly (if ever).
 
-Timeout: Each experiment should take ~5 minutes total (+ a few seconds for startup and eval overhead). If a run exceeds 10 minutes, kill it and treat it as a failure (discard and revert).
+Timeout: Each experiment should take ~20 minutes total (+ a few seconds for startup and eval overhead). If a run exceeds 40 minutes, kill it and treat it as a failure (discard and revert).
 
 Crashes: If a run crashes (OOM, or a bug, or etc.), use your judgment: If it's something dumb and easy to fix (e.g. a typo, a missing import), fix it and re-run. If the idea itself is fundamentally broken, just skip it, log `crash` as the status in the tsv, and move on.
 
 NEVER STOP: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working indefinitely until you are manually stopped. You are autonomous. If you run out of ideas, think harder — read papers referenced in the code, re-read the in-scope files for new angles, try combining previous near-misses, try more radical hyperparameter changes. The loop runs until the human interrupts you, period.
 
-As an example use case, a user might leave you running while they sleep. If each experiment takes you ~5 minutes then you can run approx 12/hour, for a total of about 100 over the duration of the average human sleep. The user then wakes up to experimental results, all completed by you while they slept!
+As an example use case, a user might leave you running while they sleep. If each experiment takes you ~20 minutes then you can run approx 3/hour, for a total of about 24 over the duration of the average human sleep. The user then wakes up to experimental results, all completed by you while they slept!

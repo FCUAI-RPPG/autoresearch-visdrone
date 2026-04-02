@@ -537,7 +537,8 @@ def collate_fn(batch):
 
 def get_dataloader(split_dir: Path | str, img_size: int = IMG_SIZE,
                    batch_size: int = 16, num_workers: int = 4,
-                   augment: bool = False, shuffle: bool = True):
+                   augment: bool = False, shuffle: bool = True,
+                   worker_init_fn=None):
     """
     Factory for train / val DataLoaders.
 
@@ -554,6 +555,7 @@ def get_dataloader(split_dir: Path | str, img_size: int = IMG_SIZE,
         num_workers=num_workers,
         pin_memory=True,
         collate_fn=collate_fn,
+        worker_init_fn=worker_init_fn,
         drop_last=shuffle,
     )
 

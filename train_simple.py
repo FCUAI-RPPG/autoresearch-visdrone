@@ -52,17 +52,24 @@ FREEZE_LAYERS  = 11                 # 0 = train everything, 11 = freeze backbone
 IMG_SIZE       = 1280
 BATCH_SIZE     = 32
 NUM_WORKERS    = 8
-TIME_BUDGET    = 300                # wall-clock training seconds (10 min)
+TIME_BUDGET    = 1200                # wall-clock training seconds (20 min)
 
-LR             = 3e-4               # initial lr for unfrozen params (AdamW)
-LR_FROZEN_HEAD = 1e-3               # lr for detection head (always trainable)
-WEIGHT_DECAY   = 1e-3
-WARMUP_STEPS   = 100
+LR             = 1e-3               # initial lr for unfrozen params (AdamW)
+WEIGHT_DECAY   = 5e-4
+WARMUP_STEPS   = 150
 MAX_GRAD_NORM  = 10.0
 
 # ── Inference ───────────────────────────────────────────────────────────────
 CONF_THRESHOLD = 0.01
 NMS_IOU_THR    = 0.45
+
+# ── Reproducibility ─────────────────────────────────────────────────────────
+SEED           = 42
+
+# ── Loss coefficients ────────────────────────────────────────────────────────
+LOSS_BOX       = 7.5                # CIoU loss weight
+LOSS_CLS       = 0.5                # BCE classification loss weight
+LOSS_DFL       = 1.5                # DFL loss weight
 
 
 # ===========================================================================
@@ -206,17 +213,30 @@ def postprocess_ultralytics(raw, conf_thr: float, nms_thr: float, device):
 def main():
     program_start = time.perf_counter()   # wall-clock start of entire run
 
+    import random, numpy as np
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device : {device}")
 
     # ── Dataloaders ──────────────────────────────────────────────────────
+    def worker_init_fn(worker_id):
+        np.random.seed(SEED + worker_id)
+        random.seed(SEED + worker_id)
+
     train_loader = get_dataloader(
         TRAIN_DIR, img_size=IMG_SIZE, batch_size=BATCH_SIZE,
         num_workers=NUM_WORKERS, augment=True, shuffle=True,
+        worker_init_fn=worker_init_fn,
     )
     val_loader = get_dataloader(
         VAL_DIR, img_size=IMG_SIZE, batch_size=BATCH_SIZE,
         num_workers=NUM_WORKERS, augment=False, shuffle=False,
+        worker_init_fn=worker_init_fn,
     )
     print(f"Train batches: {len(train_loader)}  Val batches: {len(val_loader)}")
 
@@ -244,7 +264,7 @@ def main():
     from types import SimpleNamespace
 
     # Patch model.args so v8DetectionLoss initialises correctly
-    net.args = SimpleNamespace(box=7.5, cls=0.5, dfl=1.5)
+    net.args = SimpleNamespace(box=LOSS_BOX, cls=LOSS_CLS, dfl=LOSS_DFL)
 
     criterion = v8DetectionLoss(net)
 
