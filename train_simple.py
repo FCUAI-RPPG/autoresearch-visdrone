@@ -52,7 +52,7 @@ FREEZE_LAYERS  = 11                 # 0 = train everything, 11 = freeze backbone
 IMG_SIZE       = 1280
 BATCH_SIZE     = 32
 NUM_WORKERS    = 8
-TIME_BUDGET    = 1200                # wall-clock training seconds (20 min)
+TIME_BUDGET    = 1500                # wall-clock training seconds (25 min)
 
 LR             = 5e-5               # initial lr for unfrozen params (AdamW)
 WEIGHT_DECAY   = 1e-4
@@ -252,7 +252,7 @@ def main():
 
     # ── Optimiser & scheduler ──────────────────────────────────────────
     optimizer = build_optimizer(net, LR, WEIGHT_DECAY)
-    total_steps = 1000     # slightly gentler cosine decay
+    total_steps = 1200     # match cosine decay to longer training
 
     def lr_lambda(step: int) -> float:
         if step < WARMUP_STEPS:
