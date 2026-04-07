@@ -391,43 +391,62 @@ def main():
     # print(f"Loss history saved → {loss_csv}  ({len(loss_log)} rows)")
 
     # ── Evaluation helper ────────────────────────────────────────────
+    def _decode_raw(raw, imgs):
+        """Extract decoded (B, 4+NC, A) tensor from ultralytics output and normalise."""
+        if isinstance(raw, (list, tuple)):
+            decoded = None
+            for item in raw:
+                if (isinstance(item, torch.Tensor)
+                        and item.ndim == 3
+                        and item.shape[1] == 4 + NUM_CLASSES):
+                    decoded = item
+                    break
+            raw = decoded if decoded is not None else raw[0]
+        if raw.shape[1] >= 4:
+            _, _, h, w = imgs.shape
+            raw = raw.clone()
+            raw[:, 0] /= w
+            raw[:, 1] /= h
+            raw[:, 2] /= w
+            raw[:, 3] /= h
+        return raw
+
     def run_eval(loader):
         preds, gts = [], []
         with torch.no_grad():
             for imgs, labels, counts in loader:
                 imgs = imgs.to(device, non_blocking=True)
-                raw = net(imgs)
 
-                # Robustly extract decoded pred tensor from various ultralytics
-                # output formats:
-                #   eval mode (new):  Tensor(B, 4+NC, A)
-                #   eval mode (old):  tuple(Tensor(B, 4+NC, A), [train_outs...])
-                # Search for the tensor whose channel dim == 4 + NUM_CLASSES.
-                if isinstance(raw, (list, tuple)):
-                    decoded = None
-                    for item in raw:
-                        if (isinstance(item, torch.Tensor)
-                                and item.ndim == 3
-                                and item.shape[1] == 4 + NUM_CLASSES):
-                            decoded = item
-                            break
-                    raw = decoded if decoded is not None else raw[0]
+                # Original pass
+                raw1 = _decode_raw(net(imgs), imgs)
+                det1 = postprocess_ultralytics(raw1, CONF_THRESHOLD, NMS_IOU_THR, device)
 
-                # Normalise box coords using actual spatial dims (handles
-                # non-square / letterboxed images correctly).
-                if raw.shape[1] >= 4:
-                    _, _, h, w = imgs.shape
-                    raw = raw.clone()
-                    raw[:, 0] /= w   # cx
-                    raw[:, 1] /= h   # cy
-                    raw[:, 2] /= w   # bw
-                    raw[:, 3] /= h   # bh
+                # TTA: horizontal flip
+                imgs_flip = imgs.flip(-1)
+                raw2 = _decode_raw(net(imgs_flip), imgs_flip)
+                # Reflect cx back: cx_orig = 1 - cx_flip
+                raw2 = raw2.clone()
+                raw2[:, 0] = 1.0 - raw2[:, 0]
+                det2 = postprocess_ultralytics(raw2, CONF_THRESHOLD, NMS_IOU_THR, device)
 
-                det_list = postprocess_ultralytics(raw, CONF_THRESHOLD,
-                                                   NMS_IOU_THR, device)
                 for b in range(len(imgs)):
                     n = counts[b].item()
-                    preds.append(det_list[b].cpu())
+                    # Merge detections from both passes then re-NMS
+                    merged = torch.cat([det1[b], det2[b]], dim=0)
+                    if merged.shape[0] > 0:
+                        from torchvision.ops import nms as tv_nms
+                        from prepare import cxcywh_to_xyxy
+                        kept = []
+                        for c in range(NUM_CLASSES):
+                            cm = merged[:, 5] == c
+                            if not cm.any():
+                                continue
+                            cb = merged[cm, :4]
+                            cs = merged[cm, 4]
+                            keep = tv_nms(cxcywh_to_xyxy(cb), cs, NMS_IOU_THR)
+                            kept.append(merged[cm][keep])
+                        merged = torch.cat(kept, dim=0) if kept else torch.zeros((0, 6), device=device)
+                    preds.append(merged.cpu())
                     gts.append(labels[b, :n].cpu())
         return evaluate(preds, gts)
 
