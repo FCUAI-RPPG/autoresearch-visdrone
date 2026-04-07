@@ -135,9 +135,15 @@ def build_model(weights: str, freeze_layers: int, num_classes: int, device):
 
 
 def build_optimizer(net: nn.Module, lr: float, weight_decay: float):
-    """AdamW with separate param groups: frozen layers excluded."""
-    trainable = [p for p in net.parameters() if p.requires_grad]
-    return torch.optim.AdamW(trainable, lr=lr, weight_decay=weight_decay)
+    """AdamW: head gets 10x LR (re-initialised), backbone gets base LR."""
+    head = net.model[-1]
+    head_ids = {id(p) for p in head.parameters()}
+    backbone_ps = [p for p in net.parameters() if p.requires_grad and id(p) not in head_ids]
+    head_ps     = [p for p in head.parameters()  if p.requires_grad]
+    return torch.optim.AdamW([
+        {"params": backbone_ps, "lr": lr},
+        {"params": head_ps,     "lr": lr * 10},
+    ], weight_decay=weight_decay)
 
 
 # ---------------------------------------------------------------------------
