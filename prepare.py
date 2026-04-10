@@ -453,11 +453,19 @@ class VisDroneDetDataset(Dataset):
     """
 
     def __init__(self, split_dir: Path | str, img_size: int = IMG_SIZE,
-                 max_labels: int = 500, augment: bool = False):
-        self.split_dir  = Path(split_dir)
-        self.img_size   = img_size
-        self.max_labels = max_labels
-        self.augment    = augment
+                 max_labels: int = 500, augment: bool = False,
+                 scale_range: tuple = (1.0, 1.0), rotate_deg: float = 0.0,
+                 hsv_h: float = 0.0, hsv_s: tuple = (1.0, 1.0),
+                 hsv_v: tuple = (1.0, 1.0)):
+        self.split_dir   = Path(split_dir)
+        self.img_size    = img_size
+        self.max_labels  = max_labels
+        self.augment     = augment
+        self.scale_range = scale_range
+        self.rotate_deg  = rotate_deg
+        self.hsv_h       = hsv_h
+        self.hsv_s       = hsv_s
+        self.hsv_v       = hsv_v
 
         img_dir = self.split_dir / "images"
         lbl_dir = self.split_dir / "labels"
@@ -516,10 +524,102 @@ class VisDroneDetDataset(Dataset):
                     bh = bh * nh / self.img_size
                     labels.append([cls, cx, cy, bw, bh])
 
-        # ---- Random hflip augmentation ----
-        if self.augment and random.random() < 0.5:
-            img_t = img_t.flip(-1)
-            labels = [[c, 1.0 - cx, cy, bw, bh] for c, cx, cy, bw, bh in labels]
+        # ---- Augmentation (training only) ----
+        if self.augment:
+            # Random horizontal flip
+            if random.random() < 0.5:
+                img_t = img_t.flip(-1)
+                labels = [[c, 1.0 - cx, cy, bw, bh] for c, cx, cy, bw, bh in labels]
+
+            # HSV colour jitter
+            if self.hsv_h > 0 or self.hsv_s != (1.0, 1.0) or self.hsv_v != (1.0, 1.0):
+                import colorsys
+                # img_t: float32 [0,1] (C,H,W) → numpy (H,W,C)
+                img_np = img_t.permute(1, 2, 0).numpy()
+                # Split channels and apply jitter in HSV-approximate space
+                r, g, b = img_np[..., 0], img_np[..., 1], img_np[..., 2]
+                # Hue shift via a simple RGB rotation approximation
+                h_shift = random.uniform(-self.hsv_h, self.hsv_h)
+                s_scale = random.uniform(self.hsv_s[0], self.hsv_s[1])
+                v_scale = random.uniform(self.hsv_v[0], self.hsv_v[1])
+                # Convert to HSV per-pixel via numpy vectorised lookup
+                img_uint8 = (img_np * 255).clip(0, 255).astype(np.uint8)
+                img_pil   = Image.fromarray(img_uint8, mode="RGB").convert("HSV")
+                hsv = np.array(img_pil, dtype=np.float32)
+                hsv[..., 0] = (hsv[..., 0] + h_shift * 255) % 256
+                hsv[..., 1] = (hsv[..., 1] * s_scale).clip(0, 255)
+                hsv[..., 2] = (hsv[..., 2] * v_scale).clip(0, 255)
+                img_pil2 = Image.fromarray(hsv.astype(np.uint8), mode="HSV").convert("RGB")
+                img_t = torch.from_numpy(
+                    np.asarray(img_pil2, dtype=np.float32).transpose(2, 0, 1) / 255.0
+                )
+
+            # Scale jitter: randomly scale the image and re-letterbox
+            s_lo, s_hi = self.scale_range
+            if s_lo != 1.0 or s_hi != 1.0:
+                scale_factor = random.uniform(s_lo, s_hi)
+                new_size = int(round(self.img_size * scale_factor))
+                new_size = max(32, new_size)
+                # Resize image tensor via PIL round-trip
+                img_uint8 = (img_t.permute(1, 2, 0).numpy() * 255).clip(0, 255).astype(np.uint8)
+                img_pil3  = Image.fromarray(img_uint8).resize((new_size, new_size), Image.BILINEAR)
+                # Re-letterbox to img_size
+                canvas2 = Image.new("RGB", (self.img_size, self.img_size), (114, 114, 114))
+                paste_x = (self.img_size - new_size) // 2
+                paste_y = (self.img_size - new_size) // 2
+                # Clamp so we don't paste outside canvas
+                src_x = max(0, -paste_x)
+                src_y = max(0, -paste_y)
+                dst_x = max(0, paste_x)
+                dst_y = max(0, paste_y)
+                crop_w = min(new_size - src_x, self.img_size - dst_x)
+                crop_h = min(new_size - src_y, self.img_size - dst_y)
+                region = img_pil3.crop((src_x, src_y, src_x + crop_w, src_y + crop_h))
+                canvas2.paste(region, (dst_x, dst_y))
+                img_t = torch.from_numpy(
+                    np.asarray(canvas2, dtype=np.float32).transpose(2, 0, 1) / 255.0
+                )
+                # Adjust label coordinates
+                if labels:
+                    new_labels = []
+                    for c, cx, cy, bw_l, bh_l in labels:
+                        # coords were in [0,1] relative to img_size canvas
+                        # after scale: new pixel positions shift by (dst_x - src_x*...) etc.
+                        cx_px = cx * self.img_size * scale_factor + dst_x - src_x
+                        cy_px = cy * self.img_size * scale_factor + dst_y - src_y
+                        bw_px = bw_l * self.img_size * scale_factor
+                        bh_px = bh_l * self.img_size * scale_factor
+                        cx_n  = cx_px / self.img_size
+                        cy_n  = cy_px / self.img_size
+                        bw_n  = bw_px / self.img_size
+                        bh_n  = bh_px / self.img_size
+                        # Keep only boxes whose centre is inside canvas
+                        if 0 < cx_n < 1 and 0 < cy_n < 1 and bw_n > 0 and bh_n > 0:
+                            new_labels.append([c, cx_n, cy_n, bw_n, bh_n])
+                    labels = new_labels
+
+            # Random rotation (small angle, bounding box stays axis-aligned)
+            if self.rotate_deg > 0 and random.random() < 0.5:
+                angle = random.uniform(-self.rotate_deg, self.rotate_deg)
+                img_uint8 = (img_t.permute(1, 2, 0).numpy() * 255).clip(0, 255).astype(np.uint8)
+                img_rot   = Image.fromarray(img_uint8).rotate(angle, fillcolor=(114, 114, 114))
+                img_t = torch.from_numpy(
+                    np.asarray(img_rot, dtype=np.float32).transpose(2, 0, 1) / 255.0
+                )
+                # Rotate box centres (axis-aligned boxes become approximate after rotation)
+                if labels and angle != 0:
+                    import math
+                    rad = math.radians(-angle)  # PIL rotates CCW; negate for coord transform
+                    cos_a, sin_a = math.cos(rad), math.sin(rad)
+                    new_labels = []
+                    for c, cx, cy, bw_l, bh_l in labels:
+                        # Rotate centre around image centre (0.5, 0.5)
+                        dx, dy = cx - 0.5, cy - 0.5
+                        cx_r = 0.5 + dx * cos_a - dy * sin_a
+                        cy_r = 0.5 + dx * sin_a + dy * cos_a
+                        if 0 < cx_r < 1 and 0 < cy_r < 1:
+                            new_labels.append([c, cx_r, cy_r, bw_l, bh_l])
+                    labels = new_labels
 
         # ---- Pad / truncate label tensor ----
         lbl_t = torch.zeros((self.max_labels, 5), dtype=torch.float32)
@@ -538,16 +638,25 @@ def collate_fn(batch):
 def get_dataloader(split_dir: Path | str, img_size: int = IMG_SIZE,
                    batch_size: int = 16, num_workers: int = 4,
                    augment: bool = False, shuffle: bool = True,
-                   worker_init_fn=None):
+                   worker_init_fn=None, max_labels: int = 500,
+                   scale_range: tuple = (1.0, 1.0), rotate_deg: float = 0.0,
+                   hsv_h: float = 0.0, hsv_s: tuple = (1.0, 1.0),
+                   hsv_v: tuple = (1.0, 1.0)):
     """
     Factory for train / val DataLoaders.
 
     Usage in train.py:
         from prepare import get_dataloader
-        train_loader = get_dataloader(TRAIN_DIR, batch_size=16, augment=True)
+        train_loader = get_dataloader(TRAIN_DIR, batch_size=16, augment=True,
+                                      scale_range=(0.5, 1.5), hsv_h=0.015,
+                                      hsv_s=(0.5, 1.5), hsv_v=(0.5, 1.5))
         val_loader   = get_dataloader(VAL_DIR,   batch_size=16, shuffle=False)
     """
-    ds = VisDroneDetDataset(split_dir, img_size=img_size, augment=augment)
+    ds = VisDroneDetDataset(
+        split_dir, img_size=img_size, augment=augment, max_labels=max_labels,
+        scale_range=scale_range, rotate_deg=rotate_deg,
+        hsv_h=hsv_h, hsv_s=hsv_s, hsv_v=hsv_v,
+    )
     return DataLoader(
         ds,
         batch_size=batch_size,

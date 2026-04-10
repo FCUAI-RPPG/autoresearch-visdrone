@@ -1,6 +1,6 @@
 """
-train_simple.py — Fine-tune YOLOv12x on VisDrone Task-1
-                  using Ultralytics as the backbone.
+train_base.py — Fine-tune YOLOv12x on VisDrone Task-1
+                using Ultralytics as the backbone.
 
 Strategy:
   1. Load official yolov12x.pt pretrained weights
@@ -21,12 +21,14 @@ from dotenv import load_dotenv
 import os
 import time
 from pathlib import Path
-import random, numpy as np
 
+import random
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from ultralytics import YOLO
+import wandb
 
 from prepare import (
     NUM_CLASSES,
@@ -54,7 +56,7 @@ FREEZE_LAYERS  = 11                 # 0 = train everything, 11 = freeze backbone
 IMG_SIZE       = 1280
 BATCH_SIZE     = 32
 NUM_WORKERS    = 8
-TIME_BUDGET    = 1800                # wall-clock training seconds (30 min)
+TIME_BUDGET    = 3600*24*7                # wall-clock training seconds
 
 LR             = 5e-5               # initial lr for unfrozen params (AdamW)
 WEIGHT_DECAY   = 1e-4
@@ -69,87 +71,34 @@ NMS_IOU_THR    = 0.63
 SEED           = 42
 
 # ── Loss coefficients ────────────────────────────────────────────────────────
-LOSS_BOX       = 7.5                # CIoU loss weight
-LOSS_CLS       = 0.5                # BCE classification loss weight
-LOSS_DFL       = 1.5                # DFL loss weight
+LOSS_BOX       = 7.5              # CIoU loss weight
+LOSS_CLS       = 0.5              # BCE classification loss weight
+LOSS_DFL       = 1.5              # DFL loss weight
 
 # ── Data augmentation ────────────────────────────────────────────────────────
 # Per-sample augmentation (scale jitter, rotation, HSV) runs in prepare.py
 # on CPU DataLoader workers.  Only mosaic stays here (needs multiple images).
-MOSAIC_PROB   = -1               # probability to apply mosaic per batch
-ROTATE_DEG    = 0              # max rotation angle (±degrees) — passed to dataloader
-HSV_H         = 0.015             # hue jitter range (±)           — passed to dataloader
-HSV_S_RANGE   = (0.5, 1.5)       # saturation multiplier range     — passed to dataloader
-HSV_V_RANGE   = (0.5, 1.5)       # value (brightness) multiplier   — passed to dataloader
-SCALE_RANGE   = (0.5, 1.5)       # scale jitter range              — passed to dataloader
-MAX_LABELS    = 500              # per-sample label cap; 4×500 to accommodate mosaic merging
+MOSAIC_PROB   = 0.5              # probability to apply 2×2 mosaic per batch
+MAX_LABELS    = 1200             # label cap per sample after mosaic (4 × 500)
+ROTATE_DEG    = 10                # max rotation angle (±degrees) — passed to dataloader
+HSV_H         = 0.015            # hue jitter range (±)           — passed to dataloader
+HSV_S_RANGE   = (0.5, 1.5)      # saturation multiplier range     — passed to dataloader
+HSV_V_RANGE   = (0.5, 1.5)      # value (brightness) multiplier   — passed to dataloader
+SCALE_RANGE   = (0.5, 1.5)      # scale jitter range              — passed to dataloader
 
+# ── Backbone unfreeze ─────────────────────────────────────────────────────────
+UNFREEZE_STEP  = 500*10000              # unfreeze frozen backbone layers at this step
 
-# ===========================================================================
-# ── Batch Augmentation (Mosaic) ──
-# ===========================================================================
+# ── Checkpoint ──────────────────────────────────────────────────────────────
+CKPT_DIR       = Path("b-8_aug")    # checkpoint output folder
+CKPT_INTERVAL  = 2500               # save every N steps
+RESUME_CKPT    = Path("")               # set to Path/str to resume, e.g. Path("base/step_0055000.pt")
 
-def _apply_mosaic(imgs, labels, counts, img_size, device):
-    """Combine groups of 4 images into 2×2 mosaics. Batch size → B//4."""
+# ── wandb resume ─────────────────────────────────────────────────────────────
+WANDB_RUN_ID   = ""               # set to wandb run ID string to resume logging
 
-    B  = imgs.shape[0]
-    B4 = (B // 4) * 4
-    if B4 == 0:
-        return imgs, labels, counts
-
-    half       = img_size // 2
-    max_labels = labels.shape[1]
-    new_imgs, new_labels, new_counts = [], [], []
-    # (y_start, x_start) for each of the 4 quadrants
-    quads = [(0, 0), (0, half), (half, 0), (half, half)]
-
-    for i in range(0, B4, 4):
-        canvas = torch.full((3, img_size, img_size), 114 / 255,
-                            dtype=imgs.dtype, device=device)
-        mosaic_lbls = []
-
-        for j, (y1, x1) in enumerate(quads):
-            img_s = F.interpolate(imgs[i + j].unsqueeze(0), size=(half, half),
-                                  mode="bilinear", align_corners=False).squeeze(0)
-            canvas[:, y1:y1 + half, x1:x1 + half] = img_s
-
-            n = counts[i + j].item()
-            if n > 0:
-                lbl = labels[i + j, :n].clone()
-                lbl[:, 1] = (lbl[:, 1] * half + x1) / img_size
-                lbl[:, 2] = (lbl[:, 2] * half + y1) / img_size
-                lbl[:, 3] = lbl[:, 3] * 0.5
-                lbl[:, 4] = lbl[:, 4] * 0.5
-                mosaic_lbls.append(lbl)
-
-        combined = (torch.cat(mosaic_lbls, dim=0) if mosaic_lbls
-                    else torch.zeros((0, 5), dtype=labels.dtype, device=device))
-        n_comb  = min(len(combined), max_labels)
-        new_lbl = torch.zeros((max_labels, 5), dtype=labels.dtype, device=device)
-        new_lbl[:n_comb] = combined[:n_comb]
-
-        new_imgs.append(canvas)
-        new_labels.append(new_lbl)
-        new_counts.append(n_comb)
-
-    return (torch.stack(new_imgs),
-            torch.stack(new_labels),
-            torch.tensor(new_counts, dtype=counts.dtype, device=device))
-
-
-def batch_augment(imgs, labels, counts, img_size, device):
-    """Batch-level augmentation (training only).
-
-    Per-sample augmentations (scale jitter, rotation, HSV color jitter) run
-    in prepare.py on CPU DataLoader workers.  Only mosaic stays here because
-    it needs multiple images simultaneously.
-
-      Mosaic — MOSAIC_PROB probability, batch B → B//4
-    """
-
-    if random.random() < MOSAIC_PROB:
-        imgs, labels, counts = _apply_mosaic(imgs, labels, counts, img_size, device)
-    return imgs, labels, counts
+# ── Validation ──────────────────────────────────────────────────────────────
+VAL_INTERVAL   = 500                # compute val loss every N steps
 
 
 # ===========================================================================
@@ -215,15 +164,9 @@ def build_model(weights: str, freeze_layers: int, num_classes: int, device):
 
 
 def build_optimizer(net: nn.Module, lr: float, weight_decay: float):
-    """AdamW: head gets 10x LR (re-initialised), backbone gets base LR."""
-    head = net.model[-1]
-    head_ids = {id(p) for p in head.parameters()}
-    backbone_ps = [p for p in net.parameters() if p.requires_grad and id(p) not in head_ids]
-    head_ps     = [p for p in head.parameters()  if p.requires_grad]
-    return torch.optim.AdamW([
-        {"params": backbone_ps, "lr": lr},
-        {"params": head_ps,     "lr": lr * 10},
-    ], weight_decay=weight_decay)
+    """AdamW with separate param groups: frozen layers excluded."""
+    trainable = [p for p in net.parameters() if p.requires_grad]
+    return torch.optim.AdamW(trainable, lr=lr, weight_decay=weight_decay)
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +236,56 @@ def postprocess_ultralytics(raw, conf_thr: float, nms_thr: float, device):
 
 
 # ===========================================================================
+# ── Mosaic batch augmentation ──
+# ===========================================================================
+
+def _apply_mosaic(imgs, labels, counts, img_size, device):
+    """Combine groups of 4 images into 2×2 mosaics. Batch size B → B//4."""
+    B  = imgs.shape[0]
+    B4 = (B // 4) * 4
+    if B4 == 0:
+        return imgs, labels, counts
+
+    half       = img_size // 2
+    max_labels = labels.shape[1]
+    new_imgs, new_labels, new_counts = [], [], []
+    quads = [(0, 0), (0, half), (half, 0), (half, half)]  # (y_start, x_start)
+
+    for i in range(0, B4, 4):
+        canvas = torch.full((3, img_size, img_size), 114 / 255,
+                            dtype=imgs.dtype, device=device)
+        mosaic_lbls = []
+
+        for j, (y1, x1) in enumerate(quads):
+            img_s = F.interpolate(imgs[i + j].unsqueeze(0), size=(half, half),
+                                  mode="bilinear", align_corners=False).squeeze(0)
+            canvas[:, y1:y1 + half, x1:x1 + half] = img_s
+
+            n = counts[i + j].item()
+            if n > 0:
+                lbl = labels[i + j, :n].clone()
+                lbl[:, 1] = (lbl[:, 1] * half + x1) / img_size  # cx
+                lbl[:, 2] = (lbl[:, 2] * half + y1) / img_size  # cy
+                lbl[:, 3] = lbl[:, 3] * 0.5                      # bw
+                lbl[:, 4] = lbl[:, 4] * 0.5                      # bh
+                mosaic_lbls.append(lbl)
+
+        combined = (torch.cat(mosaic_lbls, dim=0) if mosaic_lbls
+                    else torch.zeros((0, 5), dtype=labels.dtype, device=device))
+        n_comb  = min(len(combined), max_labels)
+        new_lbl = torch.zeros((max_labels, 5), dtype=labels.dtype, device=device)
+        new_lbl[:n_comb] = combined[:n_comb]
+
+        new_imgs.append(canvas)
+        new_labels.append(new_lbl)
+        new_counts.append(n_comb)
+
+    return (torch.stack(new_imgs),
+            torch.stack(new_labels),
+            torch.tensor(new_counts, dtype=counts.dtype, device=device))
+
+
+# ===========================================================================
 # ② Training loop
 # ===========================================================================
 
@@ -307,6 +300,25 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device : {device}")
+
+    # ── wandb ─────────────────────────────────────────────────────────────
+    wandb.init(
+        project="visdrone-yolov12",
+        name=f"train_base",
+        id=WANDB_RUN_ID or None,
+        resume="allow" if WANDB_RUN_ID else None,
+        config={
+            "weights": WEIGHTS, "freeze_layers": FREEZE_LAYERS,
+            "img_size": IMG_SIZE, "batch_size": BATCH_SIZE,
+            "lr": LR, "weight_decay": WEIGHT_DECAY,
+            "warmup_steps": WARMUP_STEPS, "max_grad_norm": MAX_GRAD_NORM,
+            "time_budget": TIME_BUDGET, "seed": SEED,
+            "loss_box": LOSS_BOX, "loss_cls": LOSS_CLS, "loss_dfl": LOSS_DFL,
+        },
+    )
+
+    # ── Checkpoint directory ──────────────────────────────────────────────
+    CKPT_DIR.mkdir(parents=True, exist_ok=True)
 
     # ── Dataloaders ──────────────────────────────────────────────────────
     def worker_init_fn(worker_id):
@@ -333,17 +345,36 @@ def main():
 
     # ── Optimiser & scheduler ──────────────────────────────────────────
     optimizer = build_optimizer(net, LR, WEIGHT_DECAY)
-    total_steps = 1400     # match cosine decay to longer training
+
+    # Estimate total steps from time budget and one epoch duration as proxy;
+    # use a large upper bound and clamp progress to [0, 1] to avoid LR going negative.
+    # steps_per_epoch is unknown upfront, so we derive total_steps dynamically
+    # by estimating batches-per-second after the first epoch and updating the schedule.
+    # For the initial schedule, use a conservative upper bound.
+    estimated_total_steps = max(WARMUP_STEPS + 1, len(train_loader) * 50)
 
     def lr_lambda(step: int) -> float:
+        import math
         if step < WARMUP_STEPS:
             return step / max(1, WARMUP_STEPS)
-        progress = (step - WARMUP_STEPS) / max(1, total_steps - WARMUP_STEPS)
-        return 0.01 + 0.5 * 0.99 * (1 + __import__("math").cos(
-            __import__("math").pi * progress))
+        progress = min(1.0, (step - WARMUP_STEPS) / max(1, estimated_total_steps - WARMUP_STEPS))
+        return 0.01 + 0.5 * 0.99 * (1 + math.cos(math.pi * progress))
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     scaler    = torch.amp.GradScaler(enabled=(device.type == "cuda"))
+
+    # ── Resume from checkpoint ────────────────────────────────────────
+    resume_step  = 0
+    resume_epoch = 0
+    if RESUME_CKPT and Path(RESUME_CKPT).is_file():
+        ckpt = torch.load(RESUME_CKPT, map_location=device)
+        net.load_state_dict(ckpt["model"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        scheduler.load_state_dict(ckpt["scheduler"])
+        scaler.load_state_dict(ckpt["scaler"])
+        resume_step  = ckpt["step"]
+        resume_epoch = ckpt.get("epoch", 0)
+        print(f"  [resume] loaded checkpoint: {RESUME_CKPT}  (step={resume_step}, epoch={resume_epoch})")
 
     # ── Use ultralytics built-in loss ─────────────────────────────────
     # v8DetectionLoss returns: total_loss, loss_items[box_ciou, cls_bce, dfl]
@@ -380,12 +411,104 @@ def main():
             ciou = bce = dfl = 0.0
         return ciou, bce, dfl
 
+    # ── Val loss helper (train mode, no grad) ────────────────────────
+    def run_loss(loader):
+        net.train()
+        total_loss = ciou_sum = bce_sum = dfl_sum = 0.0
+        n_batches = 0
+        with torch.no_grad():
+            for imgs, labels, counts in loader:
+                imgs   = imgs.to(device, non_blocking=True)
+                labels = labels.to(device, non_blocking=True)
+                counts = counts.to(device, non_blocking=True)
+
+                batch_idx_list, cls_list, bbox_list = [], [], []
+                for b in range(len(imgs)):
+                    n = counts[b].item()
+                    if n == 0:
+                        continue
+                    gt = labels[b, :n]
+                    batch_idx_list.append(torch.full((n,), b, device=device))
+                    cls_list.append(gt[:, 0])
+                    bbox_list.append(gt[:, 1:])
+
+                ul_batch = {
+                    "batch_idx": torch.cat(batch_idx_list) if batch_idx_list
+                                 else torch.zeros(0, device=device),
+                    "cls":       torch.cat(cls_list).unsqueeze(1) if cls_list
+                                 else torch.zeros((0, 1), device=device),
+                    "bboxes":    torch.cat(bbox_list) if bbox_list
+                                 else torch.zeros((0, 4), device=device),
+                    "img":       imgs,
+                }
+
+                with torch.amp.autocast(device_type=device.type,
+                                        enabled=(device.type == "cuda")):
+                    preds = net(imgs)
+                    loss, loss_items = criterion(preds, ul_batch)
+                    loss = loss.sum()
+
+                ciou, bce, dfl = _parse_loss_items(loss_items)
+                total_loss += loss.item()
+                ciou_sum   += ciou
+                bce_sum    += bce
+                dfl_sum    += dfl
+                n_batches  += 1
+
+        n_batches = max(1, n_batches)
+        net.train()
+        return {
+            "loss_total": total_loss / n_batches,
+            "loss_ciou":  ciou_sum   / n_batches,
+            "loss_bce":   bce_sum    / n_batches,
+            "loss_dfl":   dfl_sum    / n_batches,
+        }
+
+    # ── Val mAP helper (eval mode, no grad) ─────────────────────────
+    def run_map_eval(loader):
+        """Run inference on loader, return mAP50 & mAP50-95 via prepare.evaluate()."""
+        net.eval()
+        all_preds, all_gts = [], []
+        with torch.no_grad():
+            for imgs, labels, counts in loader:
+                imgs = imgs.to(device, non_blocking=True)
+                with torch.amp.autocast(device_type=device.type,
+                                        enabled=(device.type == "cuda")):
+                    raw = net(imgs)
+
+                if isinstance(raw, (list, tuple)):
+                    decoded = None
+                    for item in raw:
+                        if (isinstance(item, torch.Tensor)
+                                and item.ndim == 3
+                                and item.shape[1] == 4 + NUM_CLASSES):
+                            decoded = item
+                            break
+                    raw = decoded if decoded is not None else raw[0]
+
+                if raw.shape[1] >= 4:
+                    _, _, h, w = imgs.shape
+                    raw = raw.clone()
+                    raw[:, 0] /= w
+                    raw[:, 1] /= h
+                    raw[:, 2] /= w
+                    raw[:, 3] /= h
+
+                det_list = postprocess_ultralytics(raw, CONF_THRESHOLD, NMS_IOU_THR, device)
+                for b in range(len(imgs)):
+                    n = counts[b].item()
+                    all_preds.append(det_list[b].cpu())
+                    all_gts.append(labels[b, :n].cpu())
+
+        net.train()
+        return evaluate(all_preds, all_gts)
+
     # ── Training ──────────────────────────────────────────────────────
     net.train()
-    step        = 0
+    step        = resume_step
     train_start = time.perf_counter()
     deadline    = train_start + TIME_BUDGET
-    epoch       = 0
+    epoch       = resume_epoch
 
     while True:
         epoch += 1
@@ -397,8 +520,9 @@ def main():
             labels = labels.to(device, non_blocking=True)
             counts = counts.to(device, non_blocking=True)
 
-            # ── Batch augmentation (mosaic) ───────────────────────────────
-            imgs, labels, counts = batch_augment(imgs, labels, counts, IMG_SIZE, device)
+            # ── Mosaic augmentation ───────────────────────────────────
+            if random.random() < MOSAIC_PROB:
+                imgs, labels, counts = _apply_mosaic(imgs, labels, counts, IMG_SIZE, device)
 
             # ── Convert labels to ultralytics batch format ────────────
             batch_idx_list, cls_list, bbox_list = [], [], []
@@ -440,6 +564,37 @@ def main():
             scheduler.step()
             step += 1
 
+            # ── Unfreeze backbone at UNFREEZE_STEP ───────────────────
+            if step == UNFREEZE_STEP:
+                print(f"  [unfreeze] step={step}: unfreezing backbone ({FREEZE_LAYERS} layers)")
+                for layer in net.model[:FREEZE_LAYERS]:
+                    for param in layer.parameters():
+                        param.requires_grad_(True)
+                tracked_ids = {id(p) for group in optimizer.param_groups for p in group["params"]}
+                new_params  = [p for p in net.parameters() if p.requires_grad and id(p) not in tracked_ids]
+                if new_params:
+                    optimizer.add_param_group({"params": new_params, "lr": LR, "weight_decay": WEIGHT_DECAY})
+                    # Sync scheduler internal state for the new param group.
+                    # PyTorch 2.11+ uses strict=True zip in step(), so base_lrs and
+                    # lr_lambdas must match optimizer.param_groups in length.
+                    scheduler.base_lrs.append(LR)
+                    scheduler.lr_lambdas.append(lr_lambda)
+                print(f"  [unfreeze] added {len(new_params)} backbone params to optimizer")
+                wandb.log({"train/backbone_unfrozen": step}, step=step, commit=False)
+
+            # ── Checkpoint every CKPT_INTERVAL steps ─────────────────
+            if step % CKPT_INTERVAL == 0:
+                ckpt_path = CKPT_DIR / f"step_{step:07d}.pt"
+                torch.save({
+                    "step":       step,
+                    "epoch":      epoch,
+                    "model":      net.state_dict(),
+                    "optimizer":  optimizer.state_dict(),
+                    "scheduler":  scheduler.state_dict(),
+                    "scaler":     scaler.state_dict(),
+                }, ckpt_path)
+                print(f"  [ckpt] saved → {ckpt_path}")
+
             # ── Record losses ─────────────────────────────────────────
             elapsed = time.perf_counter() - train_start
             lr_now  = scheduler.get_last_lr()[0]
@@ -457,6 +612,34 @@ def main():
                 "elapsed": round(elapsed, 2),
             })
 
+            # ── Log train metrics ─────────────────────────────────────
+            wandb.log({
+                "train/loss_total": total,
+                "train/loss_ciou":  ciou,
+                "train/loss_bce":   bce,
+                "train/loss_dfl":   dfl,
+                "train/lr":         lr_now,
+            }, step=step, commit=False)
+
+            # ── Validation loss + mAP every VAL_INTERVAL steps ───────
+            if step % VAL_INTERVAL == 0:
+                vl = run_loss(val_loader)
+                vm = run_map_eval(val_loader)
+                print(f"  [val]  step={step}  total={vl['loss_total']:.4f}  "
+                      f"ciou={vl['loss_ciou']:.3f}  bce={vl['loss_bce']:.3f}  "
+                      f"dfl={vl['loss_dfl']:.3f}  "
+                      f"mAP50={vm['val_mAP50']:.4f}  mAP50-95={vm['val_mAP50_95']:.4f}")
+                wandb.log({
+                    "val/loss_total": vl["loss_total"],
+                    "val/loss_ciou":  vl["loss_ciou"],
+                    "val/loss_bce":   vl["loss_bce"],
+                    "val/loss_dfl":   vl["loss_dfl"],
+                    "val/mAP50":      vm["val_mAP50"],
+                    "val/mAP50_95":   vm["val_mAP50_95"],
+                }, step=step, commit=False)
+
+            wandb.log({}, step=step, commit=True)
+
             if step % 50 == 0:
                 remaining = max(0, TIME_BUDGET - elapsed)
                 print(f"  step={step:4d}  total={total:.4f}  "
@@ -469,74 +652,56 @@ def main():
     elapsed_train = time.perf_counter() - train_start
     print(f"\nTraining done: {step} steps, {epoch} epochs, {elapsed_train:.1f}s")
 
-    # ── Save loss history → CSV ───────────────────────────────────────
-    # loss_csv = Path("loss_history.csv")
-    # with open(loss_csv, "w", newline="") as f:
-    #     writer = csv.DictWriter(
-    #         f, fieldnames=["step", "epoch", "total", "ciou", "dfl", "bce",
-    #                        "lr", "elapsed"]
-    #     )
-    #     writer.writeheader()
-    #     writer.writerows(loss_log)
-    # print(f"Loss history saved → {loss_csv}  ({len(loss_log)} rows)")
+    # ── Save final checkpoint ─────────────────────────────────────────
+    final_ckpt = CKPT_DIR / f"step_{step:07d}_final.pt"
+    torch.save({
+        "step":       step,
+        "epoch":      epoch,
+        "model":      net.state_dict(),
+        "optimizer":  optimizer.state_dict(),
+        "scheduler":  scheduler.state_dict(),
+        "scaler":     scaler.state_dict(),
+    }, final_ckpt)
+    print(f"Final checkpoint saved → {final_ckpt}")
 
     # ── Evaluation helper ────────────────────────────────────────────
-    def _decode_raw(raw, imgs):
-        """Extract decoded (B, 4+NC, A) tensor from ultralytics output and normalise."""
-        if isinstance(raw, (list, tuple)):
-            decoded = None
-            for item in raw:
-                if (isinstance(item, torch.Tensor)
-                        and item.ndim == 3
-                        and item.shape[1] == 4 + NUM_CLASSES):
-                    decoded = item
-                    break
-            raw = decoded if decoded is not None else raw[0]
-        if raw.shape[1] >= 4:
-            _, _, h, w = imgs.shape
-            raw = raw.clone()
-            raw[:, 0] /= w
-            raw[:, 1] /= h
-            raw[:, 2] /= w
-            raw[:, 3] /= h
-        return raw
-
     def run_eval(loader):
         preds, gts = [], []
         with torch.no_grad():
             for imgs, labels, counts in loader:
                 imgs = imgs.to(device, non_blocking=True)
+                raw = net(imgs)
 
-                # Original pass
-                raw1 = _decode_raw(net(imgs), imgs)
-                det1 = postprocess_ultralytics(raw1, CONF_THRESHOLD, NMS_IOU_THR, device)
+                # Robustly extract decoded pred tensor from various ultralytics
+                # output formats:
+                #   eval mode (new):  Tensor(B, 4+NC, A)
+                #   eval mode (old):  tuple(Tensor(B, 4+NC, A), [train_outs...])
+                # Search for the tensor whose channel dim == 4 + NUM_CLASSES.
+                if isinstance(raw, (list, tuple)):
+                    decoded = None
+                    for item in raw:
+                        if (isinstance(item, torch.Tensor)
+                                and item.ndim == 3
+                                and item.shape[1] == 4 + NUM_CLASSES):
+                            decoded = item
+                            break
+                    raw = decoded if decoded is not None else raw[0]
 
-                # TTA: horizontal flip
-                imgs_flip = imgs.flip(-1)
-                raw2 = _decode_raw(net(imgs_flip), imgs_flip)
-                # Reflect cx back: cx_orig = 1 - cx_flip
-                raw2 = raw2.clone()
-                raw2[:, 0] = 1.0 - raw2[:, 0]
-                det2 = postprocess_ultralytics(raw2, CONF_THRESHOLD, NMS_IOU_THR, device)
+                # Normalise box coords using actual spatial dims (handles
+                # non-square / letterboxed images correctly).
+                if raw.shape[1] >= 4:
+                    _, _, h, w = imgs.shape
+                    raw = raw.clone()
+                    raw[:, 0] /= w   # cx
+                    raw[:, 1] /= h   # cy
+                    raw[:, 2] /= w   # bw
+                    raw[:, 3] /= h   # bh
 
+                det_list = postprocess_ultralytics(raw, CONF_THRESHOLD,
+                                                   NMS_IOU_THR, device)
                 for b in range(len(imgs)):
                     n = counts[b].item()
-                    # Merge detections from both passes then re-NMS
-                    merged = torch.cat([det1[b], det2[b]], dim=0)
-                    if merged.shape[0] > 0:
-                        from torchvision.ops import nms as tv_nms
-                        from prepare import cxcywh_to_xyxy
-                        kept = []
-                        for c in range(NUM_CLASSES):
-                            cm = merged[:, 5] == c
-                            if not cm.any():
-                                continue
-                            cb = merged[cm, :4]
-                            cs = merged[cm, 4]
-                            keep = tv_nms(cxcywh_to_xyxy(cb), cs, NMS_IOU_THR)
-                            kept.append(merged[cm][keep])
-                        merged = torch.cat(kept, dim=0) if kept else torch.zeros((0, 6), device=device)
-                    preds.append(merged.cpu())
+                    preds.append(det_list[b].cpu())
                     gts.append(labels[b, :n].cpu())
         return evaluate(preds, gts)
 
@@ -547,7 +712,7 @@ def main():
 
     # Test-dev split (if available)
     test_metrics = None
-    if TEST_DIR is not None and (TEST_DIR / "labels").exists():
+    if TEST_DIR.exists() and (TEST_DIR / "labels").exists():
         test_loader = get_dataloader(
             TEST_DIR, img_size=IMG_SIZE, batch_size=BATCH_SIZE,
             num_workers=NUM_WORKERS, augment=False, shuffle=False,
@@ -556,7 +721,7 @@ def main():
 
     # Testset-challenge split (if available)
     challenge_metrics = None
-    if CHALLENGE_DIR is not None and (CHALLENGE_DIR / "labels").exists():
+    if CHALLENGE_DIR.exists() and (CHALLENGE_DIR / "labels").exists():
         challenge_loader = get_dataloader(
             CHALLENGE_DIR, img_size=IMG_SIZE, batch_size=BATCH_SIZE,
             num_workers=NUM_WORKERS, augment=False, shuffle=False,
@@ -657,6 +822,27 @@ def main():
             writer.writeheader()
         writer.writerow(row)
     print(f"\nExperiment result appended → {exp_csv}")
+
+    # ── wandb final metrics & finish ──────────────────────────────────
+    wandb_summary = {
+        "val/box_iou":     metrics["val_box_iou"],
+        "val/cls_acc":     metrics["val_cls_acc"],
+        "val/mAP50":       metrics["val_mAP50"],
+        "val/mAP50_95":    metrics["val_mAP50_95"],
+        "train/steps":   step,
+        "train/epochs":  epoch,
+        "peak_vram_mb":  peak_vram_mb,
+        "mfu_percent":   mfu_percent,
+    }
+    if test_metrics is not None:
+        wandb_summary.update({
+            "test/box_iou":  test_metrics["val_box_iou"],
+            "test/cls_acc":  test_metrics["val_cls_acc"],
+            "test/mAP50":    test_metrics["val_mAP50"],
+            "test/mAP50_95": test_metrics["val_mAP50_95"],
+        })
+    wandb.log(wandb_summary)
+    wandb.finish()
 
 
 if __name__ == "__main__":

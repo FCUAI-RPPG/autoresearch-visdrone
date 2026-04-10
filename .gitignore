@@ -1,2 +1,11 @@
 yolov12x.pt
-.envexperiments.csv
+.env
+experiments.csv
+wandb/
+weights/
+*.log
+*.tsv
+__pycache__/
+.claude/
+b-*/
+base/
